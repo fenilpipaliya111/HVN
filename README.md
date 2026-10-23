@@ -1,1 +1,337 @@
-# HVN
+# HVN — Vanillin Electrolysis Bayesian Optimisation
+
+A single Python script for controlling two pumps and a power supply, analysing inline UV–Vis spectra, and optimising continuous-flow vanillin electrolysis with **scikit-optimize**.
+
+The program uses `skopt.Optimizer` with a Gaussian-process model and Expected Improvement. It searches flow and current within the calibrated pump and power-supply ranges, then derives the applied charge.
+
+This README documents `vanillin_all_in_one.py`. Save the script under that name in your project folder before following the commands below. No separate pump, UV–Vis, BO, or stop Python files are required, and the calibration workbook is not required at runtime.
+
+## Current experiment settings
+
+| Setting | Value |
+| --- | --- |
+| Starting/feed vanillin concentration | **0.1 mol/L** |
+| NaOH concentration | 1.5 mol/L |
+| Electrode area | 100 cm² |
+| Cathode-side dead volume | **70 mL** |
+| Shared pump flow range | Approximately **2.8667–98.4733 mL/min** |
+| Applied current range | **5–20 A** |
+| First experiment wait | **1.5 volumes = 105 mL** |
+| Later experiment flush | **2.5 volumes = 175 mL** |
+| Initial experimental conditions | 6, using Latin hypercube sampling |
+| Subsequent BO conditions | 14 |
+| Spectra per accepted measurement | 15 usable post-flush spectra |
+| Steadiness threshold | Conversion standard deviation ≤ 0.02 |
+| Measurement timeout | 600 seconds after flushing |
+| Consecutive failed conditions before stopping | 3 |
+| Campaign time limit | 14 hours; shutdown/communication may take additional time |
+
+The feed concentration and dead volume are experiment-specific settings. Recheck the settings when the chemistry or physical setup changes.
+
+## Requirements
+
+- Python **3.10 or newer**.
+- Access to the configured OPC UA server from the laboratory computer.
+- Pump and power-supply tags matching the actual setup.
+- Spectrometer software continuously acquiring and saving individual spectra.
+- A writable folder for CSV results and event logs.
+
+Install the Python dependencies:
+
+```bash
+python -m pip install asyncua numpy "scikit-optimize>=0.10.2,<0.11"
+```
+
+scikit-optimize installs its scientific dependencies, including SciPy and scikit-learn.
+
+## Quick start
+
+### 1. Configure the script
+
+Review these settings near the top of `vanillin_all_in_one.py`:
+
+```python
+FEED_CONC_M = 0.1
+CATHODE_VOLUME_ML = 70.0
+
+FIRST_EXPERIMENT_VOLUMES = 1.5
+LATER_EXPERIMENT_VOLUMES = 2.5
+
+I_MIN, I_MAX = 5.0, 20.0
+
+OPC_URL = "opc.tcp://localhost:57888"
+SPECTRA_FOLDER = r"C:\path\to\UV VIS"
+SPECTRA_GLOB = "OnlineUVVisHVN*.txt"
+```
+
+Set `SPECTRA_FOLDER` to the actual export folder. The example path above is a placeholder. Confirm the feed concentration, electrode area, and remaining chemistry settings against the experiment.
+
+### 2. Preview the plan
+
+```bash
+python vanillin_all_in_one.py
+```
+
+The default mode prints the search limits and first proposed condition. It does **not** connect to OPC UA or operate the hardware, and the spectra folder need not exist for this preview.
+
+### 3. Run the experiment
+
+Start from stopped pumps and a switched-off power supply:
+
+```bash
+python vanillin_all_in_one.py --live
+```
+
+The script proposes conditions, operates the setup, collects spectra, updates the optimiser, and saves results automatically.
+
+Run only one controlling instance at a time.
+
+### 4. Stop the equipment
+
+Press **Ctrl+C** in the running process to request shutdown.
+
+To request a separate shutdown using the same file:
+
+```bash
+python vanillin_all_in_one.py --stop
+```
+
+A separate stop command does not terminate another running BO process. Stop the active campaign as well so it cannot issue further operating commands.
+
+Shutdown attempts, in order:
+
+1. Power supply OFF.
+2. Current setpoint zero.
+3. Cathode pump setpoint zero.
+4. Anode pump setpoint zero.
+
+Every step is attempted even if an earlier shutdown write fails. Inspect the logs and equipment for confirmation; loss of communication can prevent remote shutdown.
+
+## Startup and experiment sequence
+
+1. Connect to OPC UA and check that both pumps and the PSU are stopped.
+2. Obtain a flow/current proposal from `Optimizer.ask()`.
+3. Convert the shared flow target into separate calibrated cathode and anode RPM commands.
+4. Prepare the current setpoint.
+5. Submit both pump commands and the PSU-enable command concurrently, with no programmed pause or pump-ramp wait.
+6. Analyse and log new spectra immediately, marking flush-period rows as `flushing`.
+7. Wait the appropriate transported volume before collecting spectra for the BO result.
+8. Accept a measurement when the latest 15 usable post-flush spectra meet the steadiness threshold.
+9. Calculate conversion, consumed-vanillin productivity, and the objective.
+10. Update the optimiser using `Optimizer.tell()`.
+11. Repeat until completion, timeout, interruption, or a fault; then request shutdown.
+
+Concurrent software commands do not guarantee exactly simultaneous physical actuation. The PSU can be energised before measured flow is established. Pump monitoring is a software check, not a hardware interlock.
+
+## Transport and flushing
+
+The delay is calculated using the **new experiment's flow**:
+
+```text
+delay_minutes = number_of_volumes × 70 / flow_mL_min
+```
+
+| Flow | First experiment: 1.5 volumes | Later experiments: 2.5 volumes |
+| --- | --- | --- |
+| 5 mL/min | 21 minutes | 35 minutes |
+| 10 mL/min | 10.5 minutes | 17.5 minutes |
+| 20 mL/min | 5.25 minutes | 8.75 minutes |
+
+The delay begins after the setpoint commands complete. Spectra are analysed and logged during the delay, but those rows are excluded from the BO measurement.
+
+The first condition after each campaign startup uses 1.5 volumes, including when resuming a saved history. Subsequent conditions use 2.5 volumes. A condition that started successfully but failed spectral acceptance still counts as a started condition, so the following condition uses 2.5 volumes.
+
+## Pump calibration
+
+Both pumps receive the same requested flow but generally require different RPM.
+
+### Anode
+
+The new calibration uses:
+
+```text
+flow_mL_min = 0.5071118969420833 × rpm
+rpm = requested_flow / 0.5071118969420833
+```
+
+Measured RPM range: **5–300 rpm**.
+
+### Cathode
+
+The script uses piecewise linear interpolation between these measured mean flows:
+
+| RPM | Flow, mL/min |
+| --- | --- |
+| 10 | 2.8666667 |
+| 50 | 14.3733333 |
+| 100 | 26.0733333 |
+| 150 | 44.2066667 |
+| 200 | 60.6766667 |
+| 250 | 77.5700000 |
+| 300 | 98.4733333 |
+
+Measured RPM range: **10–300 rpm**.
+
+The shared flow search range is the overlap of both pump calibrations, approximately **2.8667–98.4733 mL/min**. The optimiser does not extrapolate below the measured minimum RPM.
+
+Fractional RPM commands are retained. If an OPC node accepts only integers, the script rejects fractional commands rather than silently truncating them. Configure command resolution before operating such hardware.
+
+## OPC UA configuration
+
+Default endpoint:
+
+```text
+opc.tcp://localhost:57888
+```
+
+Node format:
+
+```text
+ns=3;s=Hitec_OPC_DA20_Server->HVN:<tag>
+```
+
+| Function | Tag |
+| --- | --- |
+| Cathode pump setpoint | `PUMP1.W1` |
+| Cathode pump actual RPM | `PUMP1.X1` |
+| Anode pump setpoint | `PUMP2.W1` |
+| Anode pump actual RPM | `PUMP2.X1` |
+| Power supply enable | `POWERSUPPLY.ON` |
+| Current setpoint | `POWERSUPPLY.W2` |
+
+The script checks OPC read quality and uses each node's reported data type for writes. It attempts reconnection after communication failures.
+
+`POWERSUPPLY.W2` is the existing **current setpoint** tag; it is not an independently verified measured-current signal.
+
+## UV–Vis acquisition and analysis
+
+The instrument software must acquire continuously and save a **new file per spectrum**. Python watches the exported files; it does not trigger the spectrometer.
+
+Expected files:
+
+- Names matching `OnlineUVVisHVN*.txt`.
+- Two whitespace-separated columns: wavelength in nm and absorbance.
+- 2048 valid points with a strictly increasing wavelength axis after optional reversal.
+- Finite numerical values.
+
+Previously present files are ignored. Incomplete or invalid files are retried. File modification time is used to assign spectra to conditions, so export should be prompt and timestamps must be consistent with the controlling computer.
+
+The existing UV–Vis method is retained:
+
+- Default method: interpolated falling-edge crossing at **absorbance 0.75**.
+- Analysis range: **357–435 nm**.
+- Smoothing: five-point moving average.
+- Concentration calibration:
+
+```text
+concentration_M = 10 ** ((edge_wavelength_nm - 430.03839) / 19.12081)
+```
+
+An optional band-fit method is available through `METHOD = "band"`.
+
+Spectra are labelled `calibrated`, `extrapolated`, `too_concentrated`, `no_edge`, or other diagnostic statuses. Missing, unresolved, or saturated spectra are not assumed to represent complete conversion.
+
+The current implementation permits usable extrapolated concentrations in BO and applies a 0.0005 M concentration floor for conversion calculations. Extrapolated values remain estimates outside the standards. In particular, **95% conversion from 0.1 M corresponds to 0.005 M**, below the stated approximately 0.02 M lowest calibration standard. Quantitative optimisation in that region requires suitable calibration.
+
+## Flow, current, and applied charge
+
+At fixed feed concentration, flow, current, and applied charge are linked:
+
+```text
+charge_F_per_mol =
+    current_A × 60000
+    / (96485.33 × feed_concentration_M × flow_mL_min)
+```
+
+The optimiser searches **flow and current**, covering the feasible flow/charge combinations within the pump and 5–20 A limits. There is no separate 1–2 F/mol restriction.
+
+## Objective
+
+Conversion:
+
+```text
+X = clip(1 - outlet_concentration / feed_concentration, 0, 1)
+```
+
+Consumed-vanillin productivity:
+
+```text
+P_mmol_per_hour = X × feed_concentration_M × flow_mL_min × 60
+```
+
+Default weighted score:
+
+```text
+score = 0.5 × X + 0.5 × P / P_reference
+
+P_reference = feed_concentration_M × maximum_shared_flow × 60
+```
+
+The weights are editable through `W_CONVERSION` and `W_PRODUCTIVITY`. This balances concentration reduction and throughput; it does not impose a guaranteed conversion target.
+
+Setting `OBJECTIVE = "constrained"` selects a **soft penalty** for conversion below `CONVERSION_TARGET = 0.95`. It is not a hard feasibility constraint.
+
+Vanillin disappearance alone does not establish product selectivity, product yield, or faradaic efficiency. The faradaic-efficiency column is intentionally blank.
+
+## Bayesian optimisation implementation
+
+The script uses:
+
+```python
+Optimizer(
+    dimensions=[
+        Real(q_lo, q_hi, name="flow_mL_min"),
+        Real(I_MIN, I_MAX, name="current_A"),
+    ],
+    base_estimator="GP",
+    n_initial_points=6,
+    initial_point_generator="lhs",
+    acq_func="EI",
+    acq_optimizer="sampling",
+    acq_func_kwargs={"xi": 0.01},
+    acq_optimizer_kwargs={"n_points": 20000},
+    random_state=1,
+)
+```
+
+The physical experiment runs between the ask and tell operations:
+
+```python
+flow, current = optimizer.ask()
+
+# Operate equipment, wait for transport, collect and validate spectra.
+score = measured_experimental_score
+
+optimizer.tell([flow, current], -score)
+```
+
+**scikit-optimize minimises**, so the maximisation score is negated before `tell()`. CSV history retains the positive experimental score, and the reported best condition reverses the sign again.
+
+Only accepted steady measurements are supplied to the optimiser. Failed measurements are not assigned an invented score. Without a new observation, the optimiser may propose the same condition again.
+
+Reference: [scikit-optimize Bayesian optimisation example](https://scikit-optimize.github.io/stable/auto_examples/bayesian-optimization.html).
+
+## Output files
+
+Files are saved beside the Python script:
+
+| File | Contents |
+| --- | --- |
+| `bo_history_<timestamp>.csv` | Accepted conditions, flow, current, charge, conversion, productivity, and objective |
+| `bo_spectra_<timestamp>.csv` | Per-spectrum analysis, including `flushing` and `measurement` rows |
+| `run_<timestamp>.log` | Proposed conditions, operating events, warnings, and shutdown results |
+
+## Monitoring and limits
+
+- A pump deviation greater than 0.3 rpm lasting 30 seconds triggers a fault.
+- An unexpectedly disabled PSU triggers a fault.
+- Conditions without sufficient steady usable spectra within the measurement window are rejected.
+- Three consecutive failed conditions stop the campaign.
+- The campaign deadline requests shutdown even during flushing; communication and cleanup can take additional time.
+- On Windows, the script requests that the computer remain awake during the campaign.
+
+## Validation status
+
+The scikit-optimize version passed **12 offline checks**, including calibration conversions, real GP/EI proposals inside bounds, objective-sign handling, simulated experiment timing, transient logging, shutdown paths, and standalone command-line operation.
+
+**Physical pump, PSU, and spectrometer operation has not been validated by these offline checks.**
