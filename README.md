@@ -1,10 +1,61 @@
 # HVN — Vanillin Electrolysis Bayesian Optimisation
 
-A single Python script for controlling two pumps and a power supply, analysing inline UV–Vis spectra, and optimising continuous-flow vanillin electrolysis with **scikit-optimize**.
+A Python controller, available in single-file and modular editions, for controlling two pumps and a power supply, analysing inline UV–Vis spectra, and optimising continuous-flow vanillin electrolysis with **scikit-optimize**.
 
 The program uses `skopt.Optimizer` with a Gaussian-process model and Expected Improvement. It searches flow and current within the calibrated pump and power-supply ranges, then derives the applied charge.
 
-This README documents `vanillin_all_in_one.py`. Save the script under that name in your project folder before following the commands below. No separate pump, UV–Vis, BO, or stop Python files are required, and the calibration workbook is not required at runtime.
+The main quick-start commands below use `vanillin_all_in_one.py`, which contains all control and analysis code. The modular edition provides the same BO workflow through separate files. The calibration workbook is not required at runtime in either edition.
+
+## Separate-file edition
+
+Keep these files together in the same folder:
+
+| File | Purpose |
+| --- | --- |
+| `lv.py` | OPC UA tags, pump calibration, flow/RPM conversion, and low-level reads/writes |
+| `uvvis.py` | Spectrum parsing, A = 0.75 edge analysis, and concentration calibration |
+| `run_all.py` | Shared connection/start/shutdown helpers and an optional fixed-condition runner |
+| `bo_loop.py` | scikit-optimize ask/tell loop, flushing, steady measurements, objectives, and CSV history |
+| `stop.py` | Manual shutdown entry point |
+| `requirements.txt` | Dependencies for either edition |
+
+Install dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Preview or run modular Bayesian optimisation:
+
+```bash
+python bo_loop.py
+python bo_loop.py --live
+```
+
+Request shutdown:
+
+```bash
+python bo_loop.py --stop
+```
+
+Or use:
+
+```bash
+python stop.py
+```
+
+For a fixed condition without BO, edit `FLOW_ML_MIN` and `CURRENT_A` in `run_all.py`, then preview or operate:
+
+```bash
+python run_all.py
+python run_all.py --live
+```
+
+For the modular BO workflow, edit chemistry, flow/current bounds, spectra folder, and the **1.5-volume first / 2.5-volume later** timing in `bo_loop.py`; edit OPC configuration and pump calibration in `lv.py`; edit UV–Vis calibration in `uvvis.py`. The optional fixed-condition runner has its own operating settings in `run_all.py`.
+
+The modular BO edition uses **0.1 M feed**, **70 mL dead volume**, **5–20 A**, and the same scikit-optimize configuration and objective-sign convention as the single-file edition. It needs no import of `vanillin_all_in_one.py`.
+
+Choose one controller entry point at a time. Do not run the single-file controller, modular BO controller, or fixed-condition runner concurrently. A manual stop request does not terminate an independently running controller process.
 
 ## Current experiment settings
 
