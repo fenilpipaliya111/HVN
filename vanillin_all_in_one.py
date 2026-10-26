@@ -50,7 +50,7 @@ J_MIN, J_MAX = (1000 * I_MIN / ELECTRODE_AREA_CM2, 1000 * I_MAX / ELECTRODE_AREA
 
 Q_MIN, Q_MAX = (2.8666666666666667, 98.47333333333334)
 
-FEED_CONC_M = 0.1  # starting/feed vanillin concentration, mol/L
+FEED_CONC_M = 0.5  # starting/feed vanillin concentration, mol/L
 
 NAOH_CONC_M = 1.5
 
