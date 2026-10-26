@@ -20,7 +20,7 @@ import uvvis
 DRY_RUN = True                  # True: only log what would happen, nothing is written
 FLOW_ML_MIN = 5.0               # target flow for both pumps
 MAX_VOLTAGE_V = 25.0  # User-approved ceiling; never command above this.
-VOLTAGE_LIMIT_V = 25.0  # CC compliance limit; PSU adjusts actual voltage.
+VOLTAGE_LIMIT_V = 25.0  # CC compliance limit; PSU performs CC regulation.
 CURRENT_A = 5.0                 # power supply current setpoint (placeholder, set yours)
 PSU_DELAY_S = 0                 # wait between setting the current and switching on
 
@@ -37,12 +37,8 @@ SPECTRA_FOLDER = r"C:\Users\fen36728\Desktop\UV VIS"   # folder where OceanView 
 SPECTRA_GLOB = "OnlineUVVisHVN*.txt"     # which files in that folder are spectra
 
 # ----------------------- protection and timing (rarely changed) -----------------------
-PUMP_TOL_RPM = 0.3              # allowed difference between actual and target rpm
-PUMP_FAULT_S = 30               # longer than this outside the tolerance -> shut down
 MONITOR_S = 5.0                 # how often the pumps are checked
 POLL_S = 2.0                    # how often the spectra folder is checked
-WAIT_POLL_S = 1.0               # polling while a pump ramps up
-WAIT_TIMEOUT_S = 300            # a pump must reach its rpm within this time
 RECONNECT_TIMEOUT_S = 60        # OPC connection must be back within this time
 RECONNECT_WAIT_S = 5.0
 NO_SPECTRUM_WARN_S = 600        # warn if OceanView writes nothing for this long
@@ -53,8 +49,8 @@ OUTPUT_FOLDER = Path(__file__).resolve().parent
 
 log = logging.getLogger("run")
 
-CSV_HEADER = ["time_iso", "t_since_pump_start_s", "file", "pump1_rpm", "pump2_rpm",
-              "psu_on", "psu_current_A", "voltage_setpoint_V", "voltage_actual_V", "edge_wavelength_nm", "concentration_M",
+CSV_HEADER = ["time_iso", "t_since_pump_start_s", "file", "pump1_setpoint_rpm", "pump2_setpoint_rpm",
+              "psu_on", "psu_current_setpoint_A", "voltage_setpoint_V", "edge_wavelength_nm", "concentration_M",
               "conversion", "status", "band_points", "band_span_nm", "max_absorbance"]
 
 
@@ -172,21 +168,11 @@ def validate_voltage(value):
     return voltage
 
 
-async def read_voltage(link):
-    """Read actual voltage; never write to X1. Over-ceiling readings stop the run."""
-    actual_v = float(await link.read(lv.PSU_VOLTAGE_ACT))
-    if not isfinite(actual_v):
-        raise RuntimeError("Actual voltage readback is not finite")
-    if actual_v > MAX_VOLTAGE_V:
-        raise RuntimeError(f"Actual voltage {actual_v:.3f} V exceeds the 25 V maximum")
-    return actual_v
-
-
 async def start_together(link, rpm1, rpm2, current, voltage):
     voltage = validate_voltage(voltage)
     if not 5.0 <= current <= 20.0:
         raise ValueError("Current must stay within 5-20 A")
-    # Prepare both setpoints before PSU enable; never write to actual-voltage X1.
+    # Prepare voltage/current setpoints before PSU enable.
     await link.write(lv.PSU_VOLTAGE_SET, voltage)
     await link.write(lv.PSU_SET, current)
     tasks = [asyncio.create_task(link.write(tag, value)) for tag, value in (
@@ -200,22 +186,10 @@ async def start_together(link, rpm1, rpm2, current, voltage):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def wait_rpm(link, tag, name, target, tol=0.1):
-    t0 = time.monotonic()
-    while time.monotonic() - t0 < WAIT_TIMEOUT_S:
-        rpm = float(await link.read(tag))
-        log.info("%s pump: %.2f rpm (target %.2f, ~%.2f mL/min)",
-                 name, rpm, target, lv.rpm_to_flow(rpm, name))
-        if abs(rpm - target) <= tol:
-            return rpm
-        await asyncio.sleep(WAIT_POLL_S)
-    raise TimeoutError(f"{name} pump did not reach {target} rpm in {WAIT_TIMEOUT_S} s")
-
-
 async def read_process(link):
-    """RPMs, PSU enable/current setpoint and set/actual voltage (blank if link is down)."""
+    """Pump/current/voltage setpoints and PSU enable (blank if link is down)."""
     out = []
-    for tag in (lv.PUMP1_ACT, lv.PUMP2_ACT, lv.PSU_ON, lv.PSU_SET, lv.PSU_VOLTAGE_SET, lv.PSU_VOLTAGE_ACT):
+    for tag in (lv.PUMP1_SET, lv.PUMP2_SET, lv.PSU_ON, lv.PSU_SET, lv.PSU_VOLTAGE_SET):
         try:
             out.append(round(float(await link.read(tag, timeout_s=10)), 3))
         except ConnectionLost:
@@ -307,32 +281,19 @@ async def uvvis_loop(link, writer, fh, t_pump1, arrival_ts):
 
 
 async def monitor(link, rpm1, rpm2, t_pump1, max_run_s):
-    """Watch the pumps until the run ends. Returns (reason, normal_end)."""
-    bad_since = None
+    """Watch duration and PSU enable; report commanded pump RPM only."""
     last_beat = 0.0
     while True:
         now = time.time()
         remaining = t_pump1 + max_run_s - now
         if remaining <= 0:
             return "maximum run time / feed limit reached (normal end)", True
-        r1 = float(await link.read(lv.PUMP1_ACT))
-        r2 = float(await link.read(lv.PUMP2_ACT))
-        await read_voltage(link)
-        ok = abs(r1 - rpm1) <= PUMP_TOL_RPM and abs(r2 - rpm2) <= PUMP_TOL_RPM
-        if ok:
-            bad_since = None
-        else:
-            if bad_since is None:
-                bad_since = now
-                log.warning("pump outside tolerance: cathode %.2f (target %.2f), "
-                            "anode %.2f (target %.2f)", r1, rpm1, r2, rpm2)
-            if now - bad_since >= PUMP_FAULT_S:
-                return (f"pump fault: cathode {r1:.2f} rpm (target {rpm1}), "
-                        f"anode {r2:.2f} rpm (target {rpm2})"), False
+        if not bool(await link.read(lv.PSU_ON)):
+            return "power supply switched off unexpectedly", False
         if now - last_beat >= HEARTBEAT_S:
             last_beat = now
-            log.info("running %.1f min, %.1f min left | cathode %.2f rpm, anode %.2f rpm",
-                     (now - t_pump1) / 60, remaining / 60, r1, r2)
+            log.info("running %.1f min, %.1f min left | commanded cathode %.2f rpm, anode %.2f rpm",
+                     (now - t_pump1) / 60, remaining / 60, rpm1, rpm2)
         await asyncio.sleep(min(MONITOR_S, remaining))
 
 
@@ -381,19 +342,19 @@ async def run():
     keep_awake(True)
     try:
         await link.connect()
-        for tag in (lv.PUMP1_ACT, lv.PUMP2_ACT, lv.PSU_ON, lv.PSU_SET):   # preflight
+        for tag in (lv.PUMP1_SET, lv.PUMP2_SET, lv.PSU_ON, lv.PSU_SET):   # preflight
             log.info("preflight %s = %s", tag, await link.read(tag))
 
         t_pump1 = time.time()
         if (float(await link.read(lv.PSU_ON)) != 0
-                or abs(float(await link.read(lv.PUMP1_ACT))) > 0.05
-                or abs(float(await link.read(lv.PUMP2_ACT))) > 0.05):
-            raise RuntimeError("Stop the equipment before starting a new run")
+                or abs(float(await link.read(lv.PUMP1_SET))) > 0.05
+                or abs(float(await link.read(lv.PUMP2_SET))) > 0.05):
+            raise RuntimeError("Switch the PSU off and set both pump commands to zero before starting")
         await start_together(link, rpm1, rpm2, CURRENT_A, VOLTAGE_LIMIT_V)
         arrival_ts = t_pump1   # log immediately, including transport transients
         if not DRY_RUN:
             uv_task = asyncio.create_task(uvvis_loop(link, writer, csv_file, t_pump1, arrival_ts))
-        log.info("Pumps running, power supply ON")
+        log.info("Pump setpoints written; PSU enable command sent")
         if DRY_RUN:
             reason, normal = "dry run finished", True
             return
