@@ -36,7 +36,7 @@ FLOOR_NM = 357.0        # edge below this: not resolved (same as the start of th
 def load_txt(path):
     """Return (wavelengths, absorbances) from a two-column text file."""
     wl, ab = [], []
-    with open(path, "r", errors="ignore") as f:
+    with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
         for line in f:
             parts = line.replace(",", ".").split()
             if len(parts) < 2:
