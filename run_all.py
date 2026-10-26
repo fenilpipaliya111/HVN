@@ -9,6 +9,7 @@ import csv
 import logging
 import os
 import time
+from math import isfinite
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,8 @@ import uvvis
 # ========================= SETTINGS (edit before each run) =========================
 DRY_RUN = True                  # True: only log what would happen, nothing is written
 FLOW_ML_MIN = 5.0               # target flow for both pumps
+MAX_VOLTAGE_V = 25.0  # User-approved ceiling; never command above this.
+VOLTAGE_LIMIT_V = 25.0  # CC compliance limit; PSU adjusts actual voltage.
 CURRENT_A = 5.0                 # power supply current setpoint (placeholder, set yours)
 PSU_DELAY_S = 0                 # wait between setting the current and switching on
 
@@ -51,7 +54,7 @@ OUTPUT_FOLDER = Path(__file__).resolve().parent
 log = logging.getLogger("run")
 
 CSV_HEADER = ["time_iso", "t_since_pump_start_s", "file", "pump1_rpm", "pump2_rpm",
-              "psu_on", "psu_current_A", "edge_wavelength_nm", "concentration_M",
+              "psu_on", "psu_current_A", "voltage_setpoint_V", "voltage_actual_V", "edge_wavelength_nm", "concentration_M",
               "conversion", "status", "band_points", "band_span_nm", "max_absorbance"]
 
 
@@ -149,7 +152,7 @@ async def safe_shutdown(link, reason, normal=False):
         log.error('no OPC connection was ever made, nothing to switch off')
         return False
     complete = True
-    for tag, val in ((lv.PSU_ON, 0), (lv.PSU_SET, 0), (lv.PUMP1_SET, 0), (lv.PUMP2_SET, 0)):
+    for tag, val in ((lv.PSU_ON, 0), (lv.PSU_SET, 0), (lv.PSU_VOLTAGE_SET, 0), (lv.PUMP1_SET, 0), (lv.PUMP2_SET, 0)):
         try:
             await link.write(tag, val, timeout_s=60)
             log.info('shutdown: %s = %s', tag, val)
@@ -159,17 +162,38 @@ async def safe_shutdown(link, reason, normal=False):
     return complete
 
 
-async def start_together(link, rpm1, rpm2, current):
+def validate_voltage(value):
+    """Validate the commanded CC voltage limit against the 25 V ceiling."""
+    if value is None:
+        raise ValueError("Set VOLTAGE_LIMIT_V or pass --voltage-limit VOLTS before live operation")
+    voltage = float(value)
+    if not isfinite(voltage) or not 0 < voltage <= MAX_VOLTAGE_V:
+        raise ValueError("Voltage limit must be finite, greater than zero, and no more than 25 V")
+    return voltage
+
+
+async def read_voltage(link):
+    """Read actual voltage; never write to X1. Over-ceiling readings stop the run."""
+    actual_v = float(await link.read(lv.PSU_VOLTAGE_ACT))
+    if not isfinite(actual_v):
+        raise RuntimeError("Actual voltage readback is not finite")
+    if actual_v > MAX_VOLTAGE_V:
+        raise RuntimeError(f"Actual voltage {actual_v:.3f} V exceeds the 25 V maximum")
+    return actual_v
+
+
+async def start_together(link, rpm1, rpm2, current, voltage):
+    voltage = validate_voltage(voltage)
     if not 5.0 <= current <= 20.0:
         raise ValueError("Current must stay within 5-20 A")
-    # Current is prepared before enable to avoid enabling a stale current setting.
+    # Prepare both setpoints before PSU enable; never write to actual-voltage X1.
+    await link.write(lv.PSU_VOLTAGE_SET, voltage)
     await link.write(lv.PSU_SET, current)
     tasks = [asyncio.create_task(link.write(tag, value)) for tag, value in (
         (lv.PUMP1_SET, rpm1), (lv.PUMP2_SET, rpm2), (lv.PSU_ON, 1))]
     try:
         await asyncio.gather(*tasks)
     finally:
-        # Settle/cancel all writes before shutdown can begin.
         for task in tasks:
             if not task.done():
                 task.cancel()
@@ -189,9 +213,9 @@ async def wait_rpm(link, tag, name, target, tol=0.1):
 
 
 async def read_process(link):
-    """pump1 rpm, pump2 rpm, psu on, psu current (blank if the link is down)."""
+    """RPMs, PSU enable/current setpoint and set/actual voltage (blank if link is down)."""
     out = []
-    for tag in (lv.PUMP1_ACT, lv.PUMP2_ACT, lv.PSU_ON, lv.PSU_SET):
+    for tag in (lv.PUMP1_ACT, lv.PUMP2_ACT, lv.PSU_ON, lv.PSU_SET, lv.PSU_VOLTAGE_SET, lv.PSU_VOLTAGE_ACT):
         try:
             out.append(round(float(await link.read(tag, timeout_s=10)), 3))
         except ConnectionLost:
@@ -293,6 +317,7 @@ async def monitor(link, rpm1, rpm2, t_pump1, max_run_s):
             return "maximum run time / feed limit reached (normal end)", True
         r1 = float(await link.read(lv.PUMP1_ACT))
         r2 = float(await link.read(lv.PUMP2_ACT))
+        await read_voltage(link)
         ok = abs(r1 - rpm1) <= PUMP_TOL_RPM and abs(r2 - rpm2) <= PUMP_TOL_RPM
         if ok:
             bad_since = None
@@ -314,6 +339,9 @@ async def monitor(link, rpm1, rpm2, t_pump1, max_run_s):
 async def run():
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     setup_logging(stamp)
+    if VOLTAGE_LIMIT_V is not None or not DRY_RUN:
+        validate_voltage(VOLTAGE_LIMIT_V)
+    log.info("Voltage limit: %s V", VOLTAGE_LIMIT_V if VOLTAGE_LIMIT_V is not None else "not configured")
 
     # ---- check all settings before anything is started ----
     rpm1 = lv.flow_to_rpm(FLOW_ML_MIN, "cathode")        # raises if outside calibration
@@ -361,7 +389,7 @@ async def run():
                 or abs(float(await link.read(lv.PUMP1_ACT))) > 0.05
                 or abs(float(await link.read(lv.PUMP2_ACT))) > 0.05):
             raise RuntimeError("Stop the equipment before starting a new run")
-        await start_together(link, rpm1, rpm2, CURRENT_A)
+        await start_together(link, rpm1, rpm2, CURRENT_A, VOLTAGE_LIMIT_V)
         arrival_ts = t_pump1   # log immediately, including transport transients
         if not DRY_RUN:
             uv_task = asyncio.create_task(uvvis_loop(link, writer, csv_file, t_pump1, arrival_ts))
@@ -393,5 +421,9 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true")
-    DRY_RUN = not parser.parse_args().live
+    parser.add_argument("--voltage-limit", "--voltage", dest="voltage_limit", type=float, default=None, help="PSU voltage ceiling in volts, maximum 25 V")
+    args = parser.parse_args()
+    DRY_RUN = not args.live
+    if args.voltage_limit is not None:
+        VOLTAGE_LIMIT_V = args.voltage_limit
     asyncio.run(run())
