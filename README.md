@@ -69,7 +69,8 @@ Choose one controller entry point at a time. Do not run the single-file controll
 | Applied current range | **5–20 A** |
 | First experiment wait | **1.5 volumes = 105 mL** |
 | Later experiment flush | **2.5 volumes = 175 mL** |
-| Initial experimental conditions | 6, using Latin hypercube sampling |
+| First condition of a fresh campaign | **10 mL/min at 5 A** |
+| Initial experimental conditions | 6 total: one fixed low-flow condition, then five LHS-generated conditions |
 | Subsequent BO conditions | 14 |
 | Spectra per accepted measurement | 15 usable post-flush spectra |
 | Steadiness threshold | Conversion standard deviation ≤ 0.02 |
@@ -161,7 +162,7 @@ Every step is attempted even if an earlier shutdown write fails. Inspect the log
 ## Startup and experiment sequence
 
 1. Connect to OPC UA and check that both pumps and the PSU are stopped.
-2. Obtain a flow/current proposal from `Optimizer.ask()`.
+2. Use the fixed low-flow starting condition for a fresh campaign; obtain later flow/current proposals from `Optimizer.ask()`.
 3. Convert the shared flow target into separate calibrated cathode and anode RPM commands.
 4. Prepare the current setpoint.
 5. Submit both pump commands and the PSU-enable command concurrently, with no programmed pause or pump-ramp wait.
@@ -345,10 +346,18 @@ Optimizer(
 )
 ```
 
-The physical experiment runs between the ask and tell operations:
+Fresh campaigns begin at `START_FLOW_ML_MIN = 10.0` and `START_CURRENT_A = 5.0`. This fixed condition counts as the first of the six initial observations. After an accepted result, the remaining initial conditions come from the LHS generator, followed by BO-selected conditions. The full calibrated flow range and 5–20 A current range remain available after the first condition.
+
+At 0.5 M feed, this starting condition corresponds to approximately **0.6219 F/mol**. The first 105 mL wait takes **10.5 minutes** at 10 mL/min, followed by collection of steady spectra. Subsequent conditions use the existing 2.5-volume flush.
+
+The first condition is repeated if it fails spectral acceptance and no usable observation has been collected, up to the existing failure limit. Resuming a non-empty history continues the optimiser rather than forcing another low-flow initial condition.
+
+Edit the `START_FLOW_ML_MIN` and `START_CURRENT_A` settings in the chosen controller to change this first condition; they must stay within the configured flow and current bounds. These settings do not restrict later BO proposals to low flows.
+
+The physical experiment runs between proposing a condition and telling the optimiser its result:
 
 ```python
-flow, current = optimizer.ask()
+flow, current = next_condition(optimizer)
 
 # Operate equipment, wait for transport, collect and validate spectra.
 score = measured_experimental_score
