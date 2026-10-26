@@ -34,7 +34,7 @@ FEED_USE_FRACTION = 0.9         # stop when this fraction of the feed would be u
 RUN_DURATION_H = 8.0            # hard maximum run time, counted from pump 1 start
 
 SPECTRA_FOLDER = r"C:\Users\fen36728\Desktop\UV VIS"   # folder where OceanView writes the .txt files
-SPECTRA_GLOB = "OnlineUVVisHVN*.txt"     # which files in that folder are spectra
+SPECTRA_GLOB = "*OnlineUVVisHVN*.txt"     # which files in that folder are spectra
 
 # ----------------------- protection and timing (rarely changed) -----------------------
 MONITOR_S = 5.0                 # how often the pumps are checked
