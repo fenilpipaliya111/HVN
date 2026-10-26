@@ -52,6 +52,8 @@ W_PRODUCTIVITY = 0.5
 
 START_FLOW_ML_MIN = 10.0  # First accepted condition of a fresh campaign.
 START_CURRENT_A = 5.0
+MAX_VOLTAGE_V = 25.0  # User-approved ceiling; never command above this.
+VOLTAGE_LIMIT_V = 25.0  # CC compliance limit; PSU adjusts actual voltage.
 
 N_INITIAL = 6
 
@@ -96,6 +98,7 @@ FARADAY = 96485.33
 K_AMP = FARADAY * (FEED_CONC_M or 0) / 60000.0
 
 HIST_HEADER = ['time_iso', 'iteration', 'phase', 'Q_mL_min', 'charge_F_mol', 'I_A', 'conversion', 'conversion_std', 'steady', 'n_spectra', 'productivity_mmol_h', 'productivity_mmol_h_cm2', 'current_density_mA_cm2', 'faradaic_eff_not_measured', 'target_met', 'objective']
+HIST_HEADER += ["voltage_setpoint_V", "voltage_actual_mean_V"]
 
 def current_for(q, charge):
     return charge * K_AMP * q
@@ -179,6 +182,7 @@ async def check_pumps(link, rpm1, rpm2, bad):
     r2 = float(await link.read(lv.PUMP2_ACT))
     if not bool(await link.read(lv.PSU_ON)):
         raise PumpFault('Power supply switched off unexpectedly')
+    await run_all.read_voltage(link)
     now = time.time()
     if abs(r1 - rpm1) <= PUMP_TOL_RPM and abs(r2 - rpm2) <= PUMP_TOL_RPM:
         bad['since'] = None
@@ -190,7 +194,7 @@ async def check_pumps(link, rpm1, rpm2, bad):
         raise PumpFault(f'cathode {r1:.2f} rpm (target {rpm1}), anode {r2:.2f} rpm (target {rpm2})')
 
 async def apply_setpoints(link, rpm1, rpm2, current, state):
-    await run_all.start_together(link, rpm1, rpm2, current)
+    await run_all.start_together(link, rpm1, rpm2, current, VOLTAGE_LIMIT_V)
     state['psu_on'], state['I'] = (True, current)
 
 def flush_seconds(q, first_experiment):
@@ -208,14 +212,17 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
     deadline = t_measure + MAX_MEASURE_S
     run_all.log.info('experiment %d: Q %.5f mL/min, I %.5f A, charge %.5f F/mol; flush %.1f s', it, q, current, charge, flush_s)
     records = []
+    voltage_records = []
     while time.time() < deadline:
         await check_pumps(link, rpm1, rpm2, bad)
         for mt, name, res in spectra.poll(since=t_change):
             x = conversion_of(res)
+            actual_v = await run_all.read_voltage(link)
             eligible = mt >= t_measure
-            spec_writer.writerow([datetime.now().astimezone().isoformat(), it, name, res['status'], res['wavelength_nm'], res['conc_M'], x, 'measurement' if eligible else 'flushing', q, current, charge])
+            spec_writer.writerow([datetime.now().astimezone().isoformat(), it, name, res['status'], res['wavelength_nm'], res['conc_M'], x, 'measurement' if eligible else 'flushing', q, current, charge, VOLTAGE_LIMIT_V, actual_v])
             if eligible and x is not None:
                 records.append((mt, x))
+                voltage_records.append(actual_v)
         if len(records) >= MEASURE_SPECTRA:
             xs = [x for _, x in records[-MEASURE_SPECTRA:]]
             if std(xs) <= STEADY_TOL_X:
@@ -223,7 +230,7 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
                 prod = x_mean * FEED_CONC_M * q * 60.0
                 p_ref = FEED_CONC_M * flow_limits()[1] * 60.0
                 j = W_CONVERSION * x_mean + W_PRODUCTIVITY * prod / p_ref if OBJECTIVE == 'weighted' else prod / p_ref - W_PENALTY * max(0.0, CONVERSION_TARGET - x_mean)
-                return {'X': x_mean, 'X_std': x_std, 'steady': True, 'n': len(xs), 'P': prod, 'FE': '', 'J': j, 't_start': t_change, 'target_met': x_mean >= CONVERSION_TARGET}
+                return {'X': x_mean, 'X_std': x_std, 'steady': True, 'n': len(xs), 'P': prod, 'FE': '', 'J': j, 't_start': t_change, 'target_met': x_mean >= CONVERSION_TARGET, 'voltage_actual_mean_V': mean(voltage_records[-MEASURE_SPECTRA:])}
         await asyncio.sleep(POLL_S)
     run_all.log.warning('experiment %d rejected: insufficient steady usable spectra', it)
     return None
@@ -238,6 +245,9 @@ def load_history(path):
 async def run():
     stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     run_all.setup_logging(stamp)
+    if VOLTAGE_LIMIT_V is not None or not DRY_RUN:
+        run_all.validate_voltage(VOLTAGE_LIMIT_V)
+    run_all.log.info("Voltage limit: %s V", VOLTAGE_LIMIT_V if VOLTAGE_LIMIT_V is not None else "not configured")
     if not np.isfinite(FEED_CONC_M) or FEED_CONC_M <= 0:
         raise ValueError('set FEED_CONC_M (vanillin feed concentration, mol/L)')
     if not DRY_RUN and (not Path(SPECTRA_FOLDER).is_dir()):
@@ -291,7 +301,7 @@ async def run():
             spec_f.flush()
     spec_w = FlushingWriter()
     hist_w.writerow(HIST_HEADER)
-    spec_w.writerow(['time_iso', 'iteration', 'file', 'status', 'edge_nm', 'concentration_M', 'conversion', 'phase', 'Q_mL_min', 'I_A', 'charge_F_mol'])
+    spec_w.writerow(['time_iso', 'iteration', 'file', 'status', 'edge_nm', 'concentration_M', 'conversion', 'phase', 'Q_mL_min', 'I_A', 'charge_F_mol', 'voltage_setpoint_V', 'voltage_actual_V'])
     run_all.log.info('History: %s', hist_path)
     link = run_all.Link()
     spectra = Spectra(SPECTRA_FOLDER, SPECTRA_GLOB)
@@ -325,7 +335,7 @@ async def run():
                 continue
             failed = 0
             opt.tell([q, current], -res['J'])
-            hist_w.writerow([datetime.now().isoformat(timespec='seconds'), it, phase, round(q, 3), round(ch, 3), round(current, 3), round(res['X'], 4), round(res['X_std'], 4), res['steady'], res['n'], round(res['P'], 3), round(res['P'] / ELECTRODE_AREA_CM2, 5), round(1000.0 * current / ELECTRODE_AREA_CM2, 1), res['FE'], res['target_met'], round(res['J'], 4)])
+            hist_w.writerow([datetime.now().isoformat(timespec='seconds'), it, phase, round(q, 3), round(ch, 3), round(current, 3), round(res['X'], 4), round(res['X_std'], 4), res['steady'], res['n'], round(res['P'], 3), round(res['P'] / ELECTRODE_AREA_CM2, 5), round(1000.0 * current / ELECTRODE_AREA_CM2, 1), res['FE'], res['target_met'], round(res['J'], 4), VOLTAGE_LIMIT_V, round(res['voltage_actual_mean_V'], 4)])
             hist_f.flush()
             run_all.log.info('experiment %d done: conversion %.1f %% (target %.0f %%: %s), productivity %.2f mmol/h consumed vanillin, objective %.3f', it, 100 * res['X'], 100 * CONVERSION_TARGET, 'met' if res['target_met'] else 'NOT met', res['P'], res['J'])
         else:
@@ -361,12 +371,15 @@ async def stop_equipment():
         await link.close()
 
 def main():
-    global DRY_RUN
+    global DRY_RUN, VOLTAGE_LIMIT_V
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--live', action='store_true', help='operate the setup')
     mode.add_argument('--stop', action='store_true', help='request PSU off and both pumps stopped')
+    parser.add_argument("--voltage-limit", "--voltage", dest="voltage_limit", type=float, default=None, help="PSU voltage ceiling in volts, maximum 25 V")
     args = parser.parse_args()
+    if args.voltage_limit is not None:
+        VOLTAGE_LIMIT_V = args.voltage_limit
     DRY_RUN = not args.live
     try:
         asyncio.run(stop_equipment() if args.stop else run())
