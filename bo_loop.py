@@ -82,10 +82,12 @@ MAX_FAILED_IN_A_ROW = 3
 
 
 POLL_S = 2.0
+PROGRESS_LOG_S = 15.0
+EXPECTED_SPECTRUM_POINTS = 2048
 
 SPECTRA_FOLDER = 'C:\\Users\\fen36728\\Desktop\\UV VIS'
 
-SPECTRA_GLOB = 'OnlineUVVisHVN*.txt'
+SPECTRA_GLOB = '*OnlineUVVisHVN*.txt'
 
 OUTPUT_FOLDER = Path(__file__).resolve().parent
 
@@ -116,37 +118,67 @@ def create_optimizer(q_lo, q_hi):
     return Optimizer(dimensions=[Real(q_lo, q_hi, name='flow_mL_min'), Real(I_MIN, I_MAX, name='current_A')], base_estimator='GP', n_initial_points=N_INITIAL, initial_point_generator='lhs', acq_func='EI', acq_optimizer='sampling', acq_func_kwargs={'xi': EI_XI}, acq_optimizer_kwargs={'n_points': 20000}, random_state=RANDOM_SEED)
 
 class Spectra:
-
     def __init__(self, folder, pattern):
-        self.folder, self.pattern = (Path(folder), pattern)
-        self.seen, self.tries = (set(), {})
+        self.folder, self.pattern = Path(folder), pattern
+        self.seen, self.tries = set(), {}
+        self.last_scan = {}
 
     def poll(self, since):
         out = []
+        counts = dict(matched=0, seen_or_ignored=0, old=0, writing=0,
+                      unreadable=0, invalid=0, ready=0)
         for p in self.folder.glob(self.pattern):
+            counts["matched"] += 1
             if p.name in self.seen:
+                counts["seen_or_ignored"] += 1
                 continue
             try:
                 mt = p.stat().st_mtime
             except OSError:
+                counts["unreadable"] += 1
                 continue
             if mt < since:
                 self.seen.add(p.name)
+                counts["old"] += 1
                 continue
             if time.time() - mt < 0.5:
+                counts["writing"] += 1
                 continue
             try:
                 wl, ab = uvvis.load_txt(p)
-            except OSError:
-                continue
-            if len(wl) != 2048 or not np.isfinite(wl).all() or (not np.isfinite(ab).all()) or (not np.all(np.diff(wl) > 0)):
+            except OSError as exc:
+                counts["unreadable"] += 1
                 self.tries[p.name] = self.tries.get(p.name, 0) + 1
-                if self.tries[p.name] == 5:
-                    run_all.log.warning('still incomplete/invalid %s: %d lines; will retry', p.name, len(wl))
+                if self.tries[p.name] in (1, 5):
+                    run_all.log.warning("Cannot read spectrum %s yet: %s; will retry", p.name, exc)
+                continue
+            reason = None
+            if len(wl) != EXPECTED_SPECTRUM_POINTS:
+                reason = f"{len(wl)} valid rows; expected {EXPECTED_SPECTRUM_POINTS}"
+            elif not np.isfinite(wl).all() or not np.isfinite(ab).all():
+                reason = "non-finite wavelength or absorbance"
+            elif not np.all(np.diff(wl) > 0):
+                reason = "wavelength axis is not strictly increasing"
+            if reason is not None:
+                counts["invalid"] += 1
+                self.tries[p.name] = self.tries.get(p.name, 0) + 1
+                if self.tries[p.name] in (1, 5):
+                    run_all.log.warning("Spectrum %s not ready/invalid: %s; will retry", p.name, reason)
                 continue
             self.seen.add(p.name)
+            self.tries.pop(p.name, None)
+            counts["ready"] += 1
             out.append((mt, p.name, uvvis.analyse(wl, ab, None)))
-        return sorted(out, key=lambda r: r[0])
+        self.last_scan = counts
+        return sorted(out, key=lambda row: row[0])
+
+    def diagnostic_summary(self):
+        summary = ", ".join(f"{key}={value}" for key, value in self.last_scan.items())
+        if not self.last_scan.get("matched", 0):
+            examples = [p.name for _, p in zip(range(3), (p for p in self.folder.iterdir() if p.is_file()))]
+            summary += "; filename examples=" + (", ".join(examples) if examples else "none")
+        return summary
+
 
 def conversion_of(res):
     """Conversion from one analysed spectrum, or None if the spectrum is unusable."""
@@ -180,14 +212,29 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
     t_measure = time.time() + flush_s
     deadline = t_measure + MAX_MEASURE_S
     run_all.log.info('experiment %d: Q %.5f mL/min, I %.5f A, charge %.5f F/mol; flush %.1f s', it, q, current, charge, flush_s)
+    run_all.log.info("Spectra folder: %s | pattern: %s", spectra.folder, spectra.pattern)
     records = []
+    flush_announced = False
+    next_progress = 0.0
     while time.time() < deadline:
+        now = time.time()
+        if now >= t_measure and not flush_announced:
+            run_all.log.info("Flush complete. Collecting %d usable spectra; conversion std must be <= %.4f. Measurement timeout %.0f s.",
+                         MEASURE_SPECTRA, STEADY_TOL_X, MAX_MEASURE_S)
+            flush_announced = True
+            next_progress = 0.0
         for mt, name, res in spectra.poll(since=t_change):
             x = conversion_of(res)
-            eligible = mt >= t_measure
+            eligible = time.time() >= t_measure and mt >= t_measure
             spec_writer.writerow([datetime.now().astimezone().isoformat(), it, name, res['status'], res['wavelength_nm'], res['conc_M'], x, 'measurement' if eligible else 'flushing', q, current, charge, VOLTAGE_LIMIT_V])
             if eligible and x is not None:
                 records.append((mt, x))
+            concentration = "n/a" if res["conc_M"] is None else f"{res['conc_M']:.6g}"
+            conversion = "n/a" if x is None else f"{100*x:.2f}%"
+            message = run_all.log.warning if eligible and x is None else run_all.log.info
+            message("Spectrum %s [%s]: status=%s, c=%s M, conversion=%s, usable post-flush=%d/%d",
+                    name, "measurement" if eligible else "flushing", res["status"],
+                    concentration, conversion, min(len(records), MEASURE_SPECTRA), MEASURE_SPECTRA)
         if len(records) >= MEASURE_SPECTRA:
             xs = [x for _, x in records[-MEASURE_SPECTRA:]]
             if std(xs) <= STEADY_TOL_X:
@@ -196,8 +243,23 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
                 p_ref = FEED_CONC_M * flow_limits()[1] * 60.0
                 j = W_CONVERSION * x_mean + W_PRODUCTIVITY * prod / p_ref if OBJECTIVE == 'weighted' else prod / p_ref - W_PENALTY * max(0.0, CONVERSION_TARGET - x_mean)
                 return {'X': x_mean, 'X_std': x_std, 'steady': True, 'n': len(xs), 'P': prod, 'FE': '', 'J': j, 't_start': t_change, 'target_met': x_mean >= CONVERSION_TARGET}
+        now = time.time()
+        if now >= next_progress:
+            if now < t_measure:
+                run_all.log.info("Flushing: %.1f s remaining; %s", t_measure-now, spectra.diagnostic_summary())
+            else:
+                xs = [x for _, x in records[-MEASURE_SPECTRA:]]
+                spread = "n/a" if len(xs) < 2 else f"{std(xs):.4f}"
+                run_all.log.info("Measurement: usable=%d/%d, conversion std=%s (limit %.4f), %.0f s remaining; %s",
+                             min(len(records), MEASURE_SPECTRA), MEASURE_SPECTRA, spread,
+                             STEADY_TOL_X, max(0., deadline-now), spectra.diagnostic_summary())
+                if spectra.last_scan.get("matched", 0) == 0:
+                    run_all.log.warning("No spectrum files match %s in %s. Check the export folder, filename pattern and TXT saving.",
+                                   spectra.pattern, spectra.folder)
+            next_progress = now + PROGRESS_LOG_S
         await asyncio.sleep(POLL_S)
-    run_all.log.warning('experiment %d rejected: insufficient steady usable spectra', it)
+    run_all.log.warning("experiment %d rejected: %d usable post-flush spectra; need %d steady spectra. %s",
+                    it, len(records), MEASURE_SPECTRA, spectra.diagnostic_summary())
     return None
 
 def load_history(path):
@@ -331,17 +393,55 @@ async def stop_equipment():
     finally:
         await link.close()
 
+def check_spectra_exports():
+    """Inspect the newest export without connecting to or operating hardware."""
+    run_all.setup_logging(datetime.now().strftime("%Y%m%d_%H%M%S"))
+    folder = Path(SPECTRA_FOLDER)
+    run_all.log.info("Spectrum check only: folder=%s | pattern=%s", folder, SPECTRA_GLOB)
+    if not folder.is_dir():
+        run_all.log.error("Spectrum folder does not exist: %s", folder)
+        return 1
+    files = []
+    for p in folder.glob(SPECTRA_GLOB):
+        try:
+            files.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    watcher = Spectra(folder, SPECTRA_GLOB)
+    if not files:
+        watcher.poll(since=0)
+        run_all.log.error("No matching spectra. %s", watcher.diagnostic_summary())
+        return 1
+    mature = [item for item in files if time.time() - item[0] >= 0.5]
+    latest_time, latest = max(mature or files, key=lambda item: item[0])
+    run_all.log.info("Matching files=%d; newest eligible candidate=%s; file age=%.1f s", len(files), latest.name, time.time()-latest_time)
+    # Validate only the newest file; do not parse the entire historical folder.
+    watcher.seen = {p.name for _, p in files if p.name != latest.name}
+    records = watcher.poll(since=0)
+    if not records:
+        run_all.log.error("Newest export is not ready or invalid. %s", watcher.diagnostic_summary())
+        return 1
+    _, name, result = records[-1]
+    x = conversion_of(result)
+    run_all.log.info("Newest spectrum %s: status=%s, wavelength=%s nm, concentration=%s M, conversion=%s",
+                name, result["status"], result["wavelength_nm"], result["conc_M"], x)
+    return 0 if x is not None else 1
+
+
 def main():
     global DRY_RUN, VOLTAGE_LIMIT_V
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--live', action='store_true', help='operate the setup')
     mode.add_argument('--stop', action='store_true', help='request PSU off and both pumps stopped')
+    mode.add_argument("--check-spectra", action="store_true", help="check the newest spectrum export without hardware operation")
     parser.add_argument("--voltage-limit", "--voltage", dest="voltage_limit", type=float, default=None, help="PSU voltage ceiling in volts, maximum 25 V")
     args = parser.parse_args()
     if args.voltage_limit is not None:
         VOLTAGE_LIMIT_V = args.voltage_limit
     DRY_RUN = not args.live
+    if args.check_spectra:
+        raise SystemExit(check_spectra_exports())
     try:
         asyncio.run(stop_equipment() if args.stop else run())
     except KeyboardInterrupt:
