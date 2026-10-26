@@ -50,7 +50,7 @@ OUTPUT_FOLDER = Path(__file__).resolve().parent
 log = logging.getLogger("run")
 
 CSV_HEADER = ["time_iso", "t_since_pump_start_s", "file", "pump1_setpoint_rpm", "pump2_setpoint_rpm",
-              "psu_on", "psu_current_setpoint_A", "voltage_setpoint_V", "edge_wavelength_nm", "concentration_M",
+              "psu_current_setpoint_A", "voltage_setpoint_V", "edge_wavelength_nm", "concentration_M",
               "conversion", "status", "band_points", "band_span_nm", "max_absorbance"]
 
 
@@ -187,9 +187,9 @@ async def start_together(link, rpm1, rpm2, current, voltage):
 
 
 async def read_process(link):
-    """Pump/current/voltage setpoints and PSU enable (blank if link is down)."""
+    """Pump/current/voltage setpoints (blank if link is down)."""
     out = []
-    for tag in (lv.PUMP1_SET, lv.PUMP2_SET, lv.PSU_ON, lv.PSU_SET, lv.PSU_VOLTAGE_SET):
+    for tag in (lv.PUMP1_SET, lv.PUMP2_SET, lv.PSU_SET, lv.PSU_VOLTAGE_SET):
         try:
             out.append(round(float(await link.read(tag, timeout_s=10)), 3))
         except ConnectionLost:
@@ -281,15 +281,13 @@ async def uvvis_loop(link, writer, fh, t_pump1, arrival_ts):
 
 
 async def monitor(link, rpm1, rpm2, t_pump1, max_run_s):
-    """Watch duration and PSU enable; report commanded pump RPM only."""
+    """Watch duration and report commanded pump RPM; no PSU-state reads."""
     last_beat = 0.0
     while True:
         now = time.time()
         remaining = t_pump1 + max_run_s - now
         if remaining <= 0:
             return "maximum run time / feed limit reached (normal end)", True
-        if not bool(await link.read(lv.PSU_ON)):
-            return "power supply switched off unexpectedly", False
         if now - last_beat >= HEARTBEAT_S:
             last_beat = now
             log.info("running %.1f min, %.1f min left | commanded cathode %.2f rpm, anode %.2f rpm",
@@ -342,14 +340,13 @@ async def run():
     keep_awake(True)
     try:
         await link.connect()
-        for tag in (lv.PUMP1_SET, lv.PUMP2_SET, lv.PSU_ON, lv.PSU_SET):   # preflight
+        for tag in (lv.PUMP1_SET, lv.PUMP2_SET, lv.PSU_SET):   # preflight
             log.info("preflight %s = %s", tag, await link.read(tag))
 
         t_pump1 = time.time()
-        if (float(await link.read(lv.PSU_ON)) != 0
-                or abs(float(await link.read(lv.PUMP1_SET))) > 0.05
+        if (abs(float(await link.read(lv.PUMP1_SET))) > 0.05
                 or abs(float(await link.read(lv.PUMP2_SET))) > 0.05):
-            raise RuntimeError("Switch the PSU off and set both pump commands to zero before starting")
+            raise RuntimeError("Set both pump commands to zero before starting")
         await start_together(link, rpm1, rpm2, CURRENT_A, VOLTAGE_LIMIT_V)
         arrival_ts = t_pump1   # log immediately, including transport transients
         if not DRY_RUN:
