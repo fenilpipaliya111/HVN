@@ -53,7 +53,7 @@ python run_all.py --live
 
 For the modular BO workflow, edit chemistry, flow/current bounds, spectra folder, and the **1.5-volume first / 2.5-volume later** timing in `bo_loop.py`; edit OPC configuration and pump calibration in `lv.py`; edit UV–Vis calibration in `uvvis.py`. The optional fixed-condition runner has its own operating settings in `run_all.py`.
 
-The modular BO edition uses **0.1 M feed**, **70 mL dead volume**, **5–20 A**, and the same scikit-optimize configuration and objective-sign convention as the single-file edition. It needs no import of `vanillin_all_in_one.py`.
+The modular BO edition uses **0.5 M feed**, **70 mL dead volume**, **5–20 A**, and the same scikit-optimize configuration and objective-sign convention as the single-file edition. It needs no import of `vanillin_all_in_one.py`.
 
 Choose one controller entry point at a time. Do not run the single-file controller, modular BO controller, or fixed-condition runner concurrently. A manual stop request does not terminate an independently running controller process.
 
@@ -61,7 +61,7 @@ Choose one controller entry point at a time. Do not run the single-file controll
 
 | Setting | Value |
 | --- | --- |
-| Starting/feed vanillin concentration | **0.1 mol/L** |
+| Starting/feed vanillin concentration | **0.5 mol/L** |
 | NaOH concentration | 1.5 mol/L |
 | Electrode area | 100 cm² |
 | Cathode-side dead volume | **70 mL** |
@@ -102,7 +102,7 @@ scikit-optimize installs its scientific dependencies, including SciPy and scikit
 Review these settings near the top of `vanillin_all_in_one.py`:
 
 ```python
-FEED_CONC_M = 0.1
+FEED_CONC_M = 0.5
 CATHODE_VOLUME_ML = 70.0
 
 FIRST_EXPERIMENT_VOLUMES = 1.5
@@ -282,7 +282,7 @@ An optional band-fit method is available through `METHOD = "band"`.
 
 Spectra are labelled `calibrated`, `extrapolated`, `too_concentrated`, `no_edge`, or other diagnostic statuses. Missing, unresolved, or saturated spectra are not assumed to represent complete conversion.
 
-The current implementation permits usable extrapolated concentrations in BO and applies a 0.0005 M concentration floor for conversion calculations. Extrapolated values remain estimates outside the standards. In particular, **95% conversion from 0.1 M corresponds to 0.005 M**, below the stated approximately 0.02 M lowest calibration standard. Quantitative optimisation in that region requires suitable calibration.
+The current implementation permits usable extrapolated concentrations in BO and applies a 0.0005 M concentration floor for conversion calculations. Extrapolated values remain estimates outside the standards. In particular, **95% conversion from 0.5 M corresponds to 0.025 M**, near the lower end of the stated calibration standards. Lower outlet concentrations may require extrapolation and additional calibration for quantitative optimisation.
 
 ## Flow, current, and applied charge
 
