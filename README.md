@@ -71,8 +71,8 @@ Choose one controller entry point at a time. Do not run the single-file controll
 | Voltage command ceiling | **25 V maximum**; actual voltage follows the load/current regulation |
 | First experiment wait | **1.5 volumes = 105 mL** |
 | Later experiment flush | **2.5 volumes = 175 mL** |
-| First condition of a fresh campaign | **10 mL/min at 5 A** |
-| Initial experimental conditions | 6 total: one fixed low-flow condition, then five LHS-generated conditions |
+| First condition of a fresh campaign | Chosen by scikit-optimize from the full configured flow/current range |
+| Initial experimental conditions | 6, using Latin hypercube sampling over the full configured range |
 | Subsequent BO conditions | 14 |
 | Spectra per accepted measurement | 15 usable post-flush spectra |
 | Steadiness threshold | Conversion standard deviation ≤ 0.02 |
@@ -166,7 +166,7 @@ Every step is attempted even if an earlier shutdown write fails. Inspect the log
 ## Startup and experiment sequence
 
 1. Connect to OPC UA and check that both pumps and the PSU are stopped.
-2. Use the fixed low-flow starting condition for a fresh campaign; obtain later flow/current proposals from `Optimizer.ask()`.
+2. Obtain each flow/current proposal, including the first condition, from `Optimizer.ask()`.
 3. Convert the shared flow target into separate calibrated cathode and anode RPM commands.
 4. Prepare the voltage ceiling (25 V by default) and the requested current setpoint.
 5. Submit both pump commands and the PSU-enable command concurrently, with no programmed pause or pump-ramp wait.
@@ -387,18 +387,14 @@ Optimizer(
 )
 ```
 
-Fresh campaigns begin at `START_FLOW_ML_MIN = 10.0` and `START_CURRENT_A = 5.0`. This fixed condition counts as the first of the six initial observations. After an accepted result, the remaining initial conditions come from the LHS generator, followed by BO-selected conditions. The full calibrated flow range and 5–20 A current range remain available after the first condition.
+Every proposed condition, including the first, comes from `Optimizer.ask()`. The first six accepted observations use the LHS initial design over the full calibrated flow/current range, followed by BO-selected conditions. There is no fixed 10 mL/min or 5 A first condition. The random seed makes the initial design reproducible.
 
-At 0.5 M feed, this starting condition corresponds to approximately **0.6219 F/mol**. The first 105 mL wait takes **10.5 minutes** at 10 mL/min, followed by collection of steady spectra. Subsequent conditions use the existing 2.5-volume flush.
-
-The first condition is repeated if it fails spectral acceptance and no usable observation has been collected, up to the existing failure limit. Resuming a non-empty history continues the optimiser rather than forcing another low-flow initial condition.
-
-Edit the `START_FLOW_ML_MIN` and `START_CURRENT_A` settings in the chosen controller to change this first condition; they must stay within the configured flow and current bounds. These settings do not restrict later BO proposals to low flows.
+The 0.5 M feed, 25 V voltage ceiling, 1.5-volume first wait, and 2.5-volume later flush remain unchanged. Delays are calculated from each proposed flow. A resumed history continues through the same ask/tell interface.
 
 The physical experiment runs between proposing a condition and telling the optimiser its result:
 
 ```python
-flow, current = next_condition(optimizer)
+flow, current = optimizer.ask()
 
 # Operate equipment, wait for transport, collect and validate spectra.
 score = measured_experimental_score
