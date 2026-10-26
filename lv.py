@@ -4,10 +4,10 @@ from asyncua import Client, ua
 URL = "opc.tcp://localhost:57888"
 PREFIX = "Hitec_OPC_DA20_Server->HVN:"
 
-PUMP1_SET, PUMP1_ACT = "PUMP1.W1", "PUMP1.X1"   # cathode
-PUMP2_SET, PUMP2_ACT = "PUMP2.W1", "PUMP2.X1"   # anode
+PUMP1_SET = "PUMP1.W1"  # Cathode RPM setpoint.
+PUMP2_SET = "PUMP2.W1"  # Anode RPM setpoint.
 PSU_ON, PSU_SET = "POWERSUPPLY.ON", "POWERSUPPLY.W2"
-PSU_VOLTAGE_SET, PSU_VOLTAGE_ACT = "POWERSUPPLY.W1", "POWERSUPPLY.X1"
+PSU_VOLTAGE_SET = "POWERSUPPLY.W1"
 
 # New labdos calibration: rpm versus mean flow (mL/min).
 from math import isfinite
@@ -80,21 +80,6 @@ def rpm_to_flow(rpm, pump):
     if pump == "anode":
         return ANODE_K * rpm
     return interpolate(rpm, CATHODE_RPM, CATHODE_FLOW)
-
-
-async def wait_until_rpm(client, tag, pump, target_rpm, tol_rpm=0.1, timeout=300, poll=1.0):
-    if DRY_RUN:
-        print(f"[DRY RUN] would wait for {tag} to reach {target_rpm} rpm")
-        return target_rpm
-    loop = asyncio.get_running_loop()
-    t0 = loop.time()
-    while loop.time() - t0 < timeout:
-        rpm = float(await read(client, tag))
-        print(f"{pump}: {rpm:.2f} rpm (~{rpm_to_flow(rpm, pump):.2f} mL/min)")
-        if abs(rpm - target_rpm) <= tol_rpm:
-            return rpm
-        await asyncio.sleep(poll)
-    raise TimeoutError(f"{pump} did not reach {target_rpm} rpm in {timeout}s")
 
 
 async def shutdown(client):
