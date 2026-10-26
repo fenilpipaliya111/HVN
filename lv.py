@@ -7,6 +7,7 @@ PREFIX = "Hitec_OPC_DA20_Server->HVN:"
 PUMP1_SET, PUMP1_ACT = "PUMP1.W1", "PUMP1.X1"   # cathode
 PUMP2_SET, PUMP2_ACT = "PUMP2.W1", "PUMP2.X1"   # anode
 PSU_ON, PSU_SET = "POWERSUPPLY.ON", "POWERSUPPLY.W2"
+PSU_VOLTAGE_SET, PSU_VOLTAGE_ACT = "POWERSUPPLY.W1", "POWERSUPPLY.X1"
 
 # New labdos calibration: rpm versus mean flow (mL/min).
 from math import isfinite
@@ -99,7 +100,7 @@ async def wait_until_rpm(client, tag, pump, target_rpm, tol_rpm=0.1, timeout=300
 async def shutdown(client):
     """Power supply off first, then pumps. Every step is tried even if one fails."""
     errors = []
-    for tag, val in ((PSU_ON, 0), (PSU_SET, 0), (PUMP1_SET, 0), (PUMP2_SET, 0)):
+    for tag, val in ((PSU_ON, 0), (PSU_SET, 0), (PSU_VOLTAGE_SET, 0), (PUMP1_SET, 0), (PUMP2_SET, 0)):
         try:
             await write(client, tag, val)
         except Exception as e:
