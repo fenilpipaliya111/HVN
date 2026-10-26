@@ -24,7 +24,7 @@ PSU_DELAY_S = 0                 # wait between setting the current and switching
 CATHODE_VOLUME_ML = 70.0        # volume from cell entrance to the UV-Vis cuvette (cathode side)
 DELAY_FACTOR = 1.5              # delay before the first spectrum = volume / flow * this
 
-FEED_CONC_M = 0.1              # feed concentration of vanillin, e.g. 0.5 (None = no conversion)
+FEED_CONC_M = 0.5              # feed concentration of vanillin, e.g. 0.5 (None = no conversion)
 FEED_VOLUME_ML_CATHODE = None   # volume of feed in the cathode reservoir (None = not used)
 FEED_VOLUME_ML_ANODE = None     # volume of feed in the anode reservoir (None = not used)
 FEED_USE_FRACTION = 0.9         # stop when this fraction of the feed would be used
