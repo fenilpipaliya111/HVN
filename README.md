@@ -68,7 +68,7 @@ Choose one controller entry point at a time. Do not run the single-file controll
 | Shared pump flow range | Approximately **2.8667–98.4733 mL/min** |
 | Applied current range | **5–20 A** |
 | Power supply | EA PSI 9040-40 DT |
-| Voltage command ceiling | **25 V maximum**; actual voltage follows the load/current regulation |
+| Voltage command ceiling | **25 V maximum**; setpoint-only control |
 | First experiment wait | **1.5 volumes = 105 mL** |
 | Later experiment flush | **2.5 volumes = 175 mL** |
 | First condition of a fresh campaign | Chosen by scikit-optimize from the full configured flow/current range |
@@ -165,7 +165,7 @@ Every step is attempted even if an earlier shutdown write fails. Inspect the log
 
 ## Startup and experiment sequence
 
-1. Connect to OPC UA and check that both pumps and the PSU are stopped.
+1. Connect to OPC UA and check that the PSU enable flag is off and both pump setpoints are zero. This does not verify actual pump motion.
 2. Obtain each flow/current proposal, including the first condition, from `Optimizer.ask()`.
 3. Convert the shared flow target into separate calibrated cathode and anode RPM commands.
 4. Prepare the voltage ceiling (25 V by default) and the requested current setpoint.
@@ -177,7 +177,7 @@ Every step is attempted even if an earlier shutdown write fails. Inspect the log
 10. Update the optimiser using `Optimizer.tell()`.
 11. Repeat until completion, timeout, interruption, or a fault; then request shutdown.
 
-Concurrent software commands do not guarantee exactly simultaneous physical actuation. The PSU can be energised before measured flow is established. Pump monitoring is a software check, not a hardware interlock.
+Concurrent software commands do not guarantee exactly simultaneous physical actuation. The PSU can be energised before measured flow is established. The controller does not read actual pump speed or verify physical flow.
 
 ## Transport and flushing
 
@@ -249,13 +249,10 @@ ns=3;s=Hitec_OPC_DA20_Server->HVN:<tag>
 | Function | Tag |
 | --- | --- |
 | Cathode pump setpoint | `PUMP1.W1` |
-| Cathode pump actual RPM | `PUMP1.X1` |
 | Anode pump setpoint | `PUMP2.W1` |
-| Anode pump actual RPM | `PUMP2.X1` |
 | Power supply enable | `POWERSUPPLY.ON` |
 | Current setpoint | `POWERSUPPLY.W2` |
 | Voltage setpoint / CC compliance ceiling | `POWERSUPPLY.W1` |
-| Actual measured voltage (read only) | `POWERSUPPLY.X1` |
 
 The script checks OPC read quality and uses each node's reported data type for writes. It attempts reconnection after communication failures.
 
@@ -274,7 +271,7 @@ VOLTAGE_LIMIT_V = 25.0
 
 Before enabling the output, it writes the voltage ceiling to `POWERSUPPLY.W1` and BO's requested current to `POWERSUPPLY.W2`. The voltage is not another BO search variable. The PSU performs the regulation; Python does not guess voltage from current or run a voltage-ramping feedback loop.
 
-`POWERSUPPLY.X1` is **read only**. The supplied HTTP gateway would use `/read?item=...` to obtain its value, not `/write`. This implementation continues using OPC UA with the same tag names.
+Power-supply voltage control uses only the `POWERSUPPLY.W1` setpoint. The script neither reads nor writes `POWERSUPPLY.X1`. This implementation continues using OPC UA with the same setpoint tags. Pump `PUMP1.X1` and `PUMP2.X1` are also unused. Fixed-run CSV columns explicitly identify commanded RPM as `pump1_setpoint_rpm` and `pump2_setpoint_rpm`.
 
 Normal startup uses the default 25 V ceiling:
 
@@ -290,11 +287,11 @@ python vanillin_all_in_one.py --live --voltage-limit 20
 
 The same option is available on `bo_loop.py` and `run_all.py`. `--voltage` is accepted as an alias. Zero, negative, non-finite, or above-25 V operating limits are rejected before hardware operation. Shutdown can still write zero volts.
 
-The script reads actual voltage during monitoring and spectrum logging. A sampled reading above 25 V or a non-finite voltage raises an error and requests shutdown. It does not require actual voltage to equal the programmed ceiling. CSV spectra include `voltage_setpoint_V` and `voltage_actual_V`; accepted BO history includes `voltage_setpoint_V` and `voltage_actual_mean_V`, averaged over the accepted measurement window. Readbacks are taken at logging time, not retrospectively at acquisition time.
+CSV spectra and accepted BO history retain `voltage_setpoint_V`. Actual-voltage reads, measured-voltage columns, voltage averages, and voltage-readback shutdown checks have been removed. Pump actual-value reads and speed-tolerance checks are also removed. The script checks pump setpoints during preflight and keeps the PSU enable-state check.
 
 A voltage ceiling does not guarantee that the requested current can be attained. If the load requires more than 25 V, or another PSU limit applies, current can be below the request. Check the PSU's actual current and CC indication. An actual-current OPC tag has not been confirmed, so charge calculations still use the current **setpoint**, not measured current. Never resume history from a different voltage limit or experimental configuration.
 
-The 25 V check is a software command/readback limit, not a high-speed hardware interlock or guarantee against transient overshoot. Configure the PSU's own voltage/OVP protections for the installation's permitted maximum; the script does not program an OVP threshold because no OVP tag was supplied.
+The 25 V check limits commanded setpoints only. The script does not measure voltage or detect physical voltage excursions. Configure the PSU's own voltage/OVP protections for the installation's permitted maximum; the script does not program an OVP threshold because no OVP tag was supplied.
 
 ## UV–Vis acquisition and analysis
 
@@ -345,6 +342,8 @@ Conversion:
 ```text
 X = clip(1 - outlet_concentration / feed_concentration, 0, 1)
 ```
+
+Flow and current in the calculations below are commanded setpoints; actual delivery is not verified by the script.
 
 Consumed-vanillin productivity:
 
@@ -414,15 +413,14 @@ Files are saved beside the Python script:
 
 | File | Contents |
 | --- | --- |
-| `bo_history_<timestamp>.csv` | Accepted conditions, flow, current, charge, conversion, productivity, objective, voltage ceiling, and mean measured voltage |
-| `bo_spectra_<timestamp>.csv` | Per-spectrum analysis and set/measured voltage, including `flushing` and `measurement` rows |
+| `bo_history_<timestamp>.csv` | Accepted conditions, flow, current, charge, conversion, productivity, objective, and voltage setpoint |
+| `bo_spectra_<timestamp>.csv` | Per-spectrum analysis and voltage setpoint, including `flushing` and `measurement` rows |
 | `run_<timestamp>.log` | Proposed conditions, operating events, warnings, and shutdown results |
 
 ## Monitoring and limits
 
-- A pump deviation greater than 0.3 rpm lasting 30 seconds triggers a fault.
+- Pump operation is controlled by setpoints only; actual RPM is not read and there is no speed-tolerance shutdown.
 - An unexpectedly disabled PSU triggers a fault.
-- Non-finite actual voltage or a sampled reading above 25 V requests shutdown.
 - Conditions without sufficient steady usable spectra within the measurement window are rejected.
 - Three consecutive failed conditions stop the campaign.
 - The campaign deadline requests shutdown even during flushing; communication and cleanup can take additional time.
@@ -432,6 +430,6 @@ Files are saved beside the Python script:
 
 The scikit-optimize version passed **12 offline checks**, including calibration conversions, real GP/EI proposals inside bounds, objective-sign handling, simulated experiment timing, transient logging, shutdown paths, and standalone command-line operation.
 
-The voltage extension was also checked offline for voltage/current write ordering, concurrent enable, read-only X1 handling, telemetry columns, voltage reset on shutdown, 25 V command/readback limits, and CLI behaviour. These checks do not validate the site's OPC tag mapping or physical voltage regulation.
+The setpoint-only voltage implementation is checked offline for voltage/current write ordering, concurrent enable, absence of pump/voltage X1 access, setpoint-only CSV columns, voltage reset on shutdown, 25 V command limits, and CLI behaviour. These checks do not validate the site's OPC tag mapping, physical pump motion, or voltage regulation.
 
 **Physical pump, PSU, and spectrometer operation has not been validated by these offline checks.**
