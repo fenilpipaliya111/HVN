@@ -67,6 +67,8 @@ Choose one controller entry point at a time. Do not run the single-file controll
 | Cathode-side dead volume | **70 mL** |
 | Shared pump flow range | Approximately **2.8667–98.4733 mL/min** |
 | Applied current range | **5–20 A** |
+| Power supply | EA PSI 9040-40 DT |
+| Voltage command ceiling | **25 V maximum**; actual voltage follows the load/current regulation |
 | First experiment wait | **1.5 volumes = 105 mL** |
 | Later experiment flush | **2.5 volumes = 175 mL** |
 | First condition of a fresh campaign | **10 mL/min at 5 A** |
@@ -110,6 +112,7 @@ FIRST_EXPERIMENT_VOLUMES = 1.5
 LATER_EXPERIMENT_VOLUMES = 2.5
 
 I_MIN, I_MAX = 5.0, 20.0
+VOLTAGE_LIMIT_V = 25.0
 
 OPC_URL = "opc.tcp://localhost:57888"
 SPECTRA_FOLDER = r"C:\path\to\UV VIS"
@@ -154,8 +157,9 @@ Shutdown attempts, in order:
 
 1. Power supply OFF.
 2. Current setpoint zero.
-3. Cathode pump setpoint zero.
-4. Anode pump setpoint zero.
+3. Voltage setpoint zero.
+4. Cathode pump setpoint zero.
+5. Anode pump setpoint zero.
 
 Every step is attempted even if an earlier shutdown write fails. Inspect the logs and equipment for confirmation; loss of communication can prevent remote shutdown.
 
@@ -164,7 +168,7 @@ Every step is attempted even if an earlier shutdown write fails. Inspect the log
 1. Connect to OPC UA and check that both pumps and the PSU are stopped.
 2. Use the fixed low-flow starting condition for a fresh campaign; obtain later flow/current proposals from `Optimizer.ask()`.
 3. Convert the shared flow target into separate calibrated cathode and anode RPM commands.
-4. Prepare the current setpoint.
+4. Prepare the voltage ceiling (25 V by default) and the requested current setpoint.
 5. Submit both pump commands and the PSU-enable command concurrently, with no programmed pause or pump-ramp wait.
 6. Analyse and log new spectra immediately, marking flush-period rows as `flushing`.
 7. Wait the appropriate transported volume before collecting spectra for the BO result.
@@ -250,10 +254,47 @@ ns=3;s=Hitec_OPC_DA20_Server->HVN:<tag>
 | Anode pump actual RPM | `PUMP2.X1` |
 | Power supply enable | `POWERSUPPLY.ON` |
 | Current setpoint | `POWERSUPPLY.W2` |
+| Voltage setpoint / CC compliance ceiling | `POWERSUPPLY.W1` |
+| Actual measured voltage (read only) | `POWERSUPPLY.X1` |
 
 The script checks OPC read quality and uses each node's reported data type for writes. It attempts reconnection after communication failures.
 
 `POWERSUPPLY.W2` is the existing **current setpoint** tag; it is not an independently verified measured-current signal.
+
+## Automatic voltage regulation with a 25 V ceiling
+
+The configured supply is an **EA PSI 9040-40 DT**. The [EA PSI 9000 DT operating guide, section 3.2.2](https://elektroautomatik.com/shop/media/pdf/c5/d1/7d/06200500_EN.pdf#page=40) describes automatic current regulation. The supply transitions into CC operation when the load reaches the programmed current limit; the required voltage depends on the cell.
+
+The controller therefore uses:
+
+```python
+MAX_VOLTAGE_V = 25.0
+VOLTAGE_LIMIT_V = 25.0
+```
+
+Before enabling the output, it writes the voltage ceiling to `POWERSUPPLY.W1` and BO's requested current to `POWERSUPPLY.W2`. The voltage is not another BO search variable. The PSU performs the regulation; Python does not guess voltage from current or run a voltage-ramping feedback loop.
+
+`POWERSUPPLY.X1` is **read only**. The supplied HTTP gateway would use `/read?item=...` to obtain its value, not `/write`. This implementation continues using OPC UA with the same tag names.
+
+Normal startup uses the default 25 V ceiling:
+
+```bash
+python vanillin_all_in_one.py --live
+```
+
+To request a lower ceiling, for example 20 V:
+
+```bash
+python vanillin_all_in_one.py --live --voltage-limit 20
+```
+
+The same option is available on `bo_loop.py` and `run_all.py`. `--voltage` is accepted as an alias. Zero, negative, non-finite, or above-25 V operating limits are rejected before hardware operation. Shutdown can still write zero volts.
+
+The script reads actual voltage during monitoring and spectrum logging. A sampled reading above 25 V or a non-finite voltage raises an error and requests shutdown. It does not require actual voltage to equal the programmed ceiling. CSV spectra include `voltage_setpoint_V` and `voltage_actual_V`; accepted BO history includes `voltage_setpoint_V` and `voltage_actual_mean_V`, averaged over the accepted measurement window. Readbacks are taken at logging time, not retrospectively at acquisition time.
+
+A voltage ceiling does not guarantee that the requested current can be attained. If the load requires more than 25 V, or another PSU limit applies, current can be below the request. Check the PSU's actual current and CC indication. An actual-current OPC tag has not been confirmed, so charge calculations still use the current **setpoint**, not measured current. Never resume history from a different voltage limit or experimental configuration.
+
+The 25 V check is a software command/readback limit, not a high-speed hardware interlock or guarantee against transient overshoot. Configure the PSU's own voltage/OVP protections for the installation's permitted maximum; the script does not program an OVP threshold because no OVP tag was supplied.
 
 ## UV–Vis acquisition and analysis
 
@@ -377,14 +418,15 @@ Files are saved beside the Python script:
 
 | File | Contents |
 | --- | --- |
-| `bo_history_<timestamp>.csv` | Accepted conditions, flow, current, charge, conversion, productivity, and objective |
-| `bo_spectra_<timestamp>.csv` | Per-spectrum analysis, including `flushing` and `measurement` rows |
+| `bo_history_<timestamp>.csv` | Accepted conditions, flow, current, charge, conversion, productivity, objective, voltage ceiling, and mean measured voltage |
+| `bo_spectra_<timestamp>.csv` | Per-spectrum analysis and set/measured voltage, including `flushing` and `measurement` rows |
 | `run_<timestamp>.log` | Proposed conditions, operating events, warnings, and shutdown results |
 
 ## Monitoring and limits
 
 - A pump deviation greater than 0.3 rpm lasting 30 seconds triggers a fault.
 - An unexpectedly disabled PSU triggers a fault.
+- Non-finite actual voltage or a sampled reading above 25 V requests shutdown.
 - Conditions without sufficient steady usable spectra within the measurement window are rejected.
 - Three consecutive failed conditions stop the campaign.
 - The campaign deadline requests shutdown even during flushing; communication and cleanup can take additional time.
@@ -393,5 +435,7 @@ Files are saved beside the Python script:
 ## Validation status
 
 The scikit-optimize version passed **12 offline checks**, including calibration conversions, real GP/EI proposals inside bounds, objective-sign handling, simulated experiment timing, transient logging, shutdown paths, and standalone command-line operation.
+
+The voltage extension was also checked offline for voltage/current write ordering, concurrent enable, read-only X1 handling, telemetry columns, voltage reset on shutdown, 25 V command/readback limits, and CLI behaviour. These checks do not validate the site's OPC tag mapping or physical voltage regulation.
 
 **Physical pump, PSU, and spectrometer operation has not been validated by these offline checks.**
