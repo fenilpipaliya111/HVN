@@ -570,18 +570,9 @@ def std(x):
     m = mean(x)
     return (sum(((v - m) ** 2 for v in x)) / max(1, len(x) - 1)) ** 0.5
 
-class PowerSupplyFault(Exception):
-    pass
-
-async def check_power_supply(link):
-    """Check the PSU enable flag; no pump actual-value reads."""
-    if not bool(await link.read(PSU_ON)):
-        raise PowerSupplyFault("Power supply switched off unexpectedly")
-
-
 async def apply_setpoints(link, rpm1, rpm2, current, state):
     await start_together(link, rpm1, rpm2, current, VOLTAGE_LIMIT_V)
-    state['psu_on'], state['I'] = (True, current)
+    state['condition_started'], state['I'] = (True, current)
 
 def flush_seconds(q, first_experiment):
     volumes = FIRST_EXPERIMENT_VOLUMES if first_experiment else LATER_EXPERIMENT_VOLUMES
@@ -590,7 +581,7 @@ def flush_seconds(q, first_experiment):
 async def run_experiment(link, spectra, q, charge, current, state, spec_writer, it):
     rpm1, rpm2 = (flow_to_rpm(q, 'cathode'), flow_to_rpm(q, 'anode'))
     t_change = time.time()
-    first_experiment = not state['psu_on']
+    first_experiment = not state['condition_started']
     await apply_setpoints(link, rpm1, rpm2, current, state)
     flush_s = flush_seconds(q, first_experiment)
     t_measure = time.time() + flush_s
@@ -598,7 +589,6 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
     log.info('experiment %d: Q %.5f mL/min, I %.5f A, charge %.5f F/mol; flush %.1f s', it, q, current, charge, flush_s)
     records = []
     while time.time() < deadline:
-        await check_power_supply(link)
         for mt, name, res in spectra.poll(since=t_change):
             x = conversion_of(res)
             eligible = mt >= t_measure
@@ -684,15 +674,15 @@ async def run():
     log.info('History: %s', hist_path)
     link = Link()
     spectra = Spectra(SPECTRA_FOLDER, SPECTRA_GLOB)
-    state = {'psu_on': False, 'I': 0.0}
+    state = {'condition_started': False, 'I': 0.0}
     reason, normal = ('finished', False)
     campaign_mono = time.monotonic()
     failed = 0
     keep_awake(True)
     try:
         await link.connect()
-        if float(await link.read(PSU_ON)) != 0 or abs(float(await link.read(PUMP1_SET))) > 0.05 or abs(float(await link.read(PUMP2_SET))) > 0.05:
-            raise RuntimeError('power supply is enabled or a pump has a nonzero setpoint - stop it first (python vanillin_all_in_one.py --stop)')
+        if abs(float(await link.read(PUMP1_SET))) > 0.05 or abs(float(await link.read(PUMP2_SET))) > 0.05:
+            raise RuntimeError('a pump has a nonzero setpoint - stop it first (python vanillin_all_in_one.py --stop)')
         for it in range(done + 1, total + 1):
             if time.monotonic() - campaign_mono >= MAX_TOTAL_H * 3600:
                 reason, normal = ('maximum campaign time reached', True)
