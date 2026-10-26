@@ -66,6 +66,9 @@ W_CONVERSION = 0.5
 
 W_PRODUCTIVITY = 0.5
 
+START_FLOW_ML_MIN = 10.0  # First accepted condition of a fresh campaign.
+START_CURRENT_A = 5.0
+
 N_INITIAL = 6
 
 N_ITER = 14
@@ -504,6 +507,13 @@ def create_optimizer(q_lo, q_hi):
     )
 
 
+def next_condition(optimizer):
+    """Start fresh campaigns low; let BO choose after an accepted result."""
+    if not optimizer.Xi:
+        return float(START_FLOW_ML_MIN), float(START_CURRENT_A)
+    return tuple(map(float, optimizer.ask()))
+
+
 class Spectra:
 
     def __init__(self, folder, pattern):
@@ -630,6 +640,10 @@ async def run():
     if MEASURE_SPECTRA < 2 or FIRST_EXPERIMENT_VOLUMES < 1 or LATER_EXPERIMENT_VOLUMES < 1 or (CATHODE_VOLUME_ML <= 0):
         raise ValueError('Invalid measurement/flush settings')
     q_lo, q_hi = flow_limits()
+    if not (np.isfinite(START_FLOW_ML_MIN) and q_lo <= START_FLOW_ML_MIN <= q_hi):
+        raise ValueError("START_FLOW_ML_MIN must be within the shared flow bounds")
+    if not (np.isfinite(START_CURRENT_A) and I_MIN <= START_CURRENT_A <= I_MAX):
+        raise ValueError("START_CURRENT_A must be within the current bounds")
     if q_lo >= q_hi:
         raise ValueError('no flow rate satisfies the current and charge limits at this feed concentration')
     p_lo, p_hi = pump_flow_limits()
@@ -649,9 +663,9 @@ async def run():
         log.info('resumed with %d earlier experiments from %s', done, RESUME_CSV)
     total = N_INITIAL + N_ITER
     log.info('Plan: %d experiments (%d start points, then %d chosen by the optimiser)', total, N_INITIAL, N_ITER)
-    log.info("Optimiser: skopt.Optimizer, GP, expected improvement; initial design LHS")
+    log.info("Optimiser: skopt.Optimizer, GP, expected improvement; fixed low start, then LHS initial points")
     if DRY_RUN:
-        q, current = opt.ask()
+        q, current = next_condition(opt)
         log.info("First proposed condition: Q %.5f mL/min, I %.5f A, charge %.5f F/mol",
                  q, current, charge_for(q, current))
         log.info('DRY RUN: nothing was started.')
@@ -687,7 +701,7 @@ async def run():
                 reason, normal = ('maximum campaign time reached', True)
                 break
             phase = 'initial' if it <= N_INITIAL else 'bayes'
-            q, current = map(float, opt.ask())
+            q, current = next_condition(opt)
             ch = charge_for(q, current)
             remaining = MAX_TOTAL_H * 3600 - (time.monotonic() - campaign_mono)
             try:
