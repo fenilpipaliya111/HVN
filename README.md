@@ -116,7 +116,7 @@ VOLTAGE_LIMIT_V = 25.0
 
 OPC_URL = "opc.tcp://localhost:57888"
 SPECTRA_FOLDER = r"C:\path\to\UV VIS"
-SPECTRA_GLOB = "OnlineUVVisHVN*.txt"
+SPECTRA_GLOB = "*OnlineUVVisHVN*.txt"
 ```
 
 Set `SPECTRA_FOLDER` to the actual export folder. The example path above is a placeholder. Confirm the feed concentration, electrode area, and remaining chemistry settings against the experiment.
@@ -299,9 +299,9 @@ The instrument software must acquire continuously and save a **new file per spec
 
 Expected files:
 
-- Names matching `OnlineUVVisHVN*.txt`.
-- Two whitespace-separated columns: wavelength in nm and absorbance.
-- 2048 valid points with a strictly increasing wavelength axis after optional reversal.
+- Names matching `*OnlineUVVisHVN*.txt`.
+- Two whitespace-separated columns: wavelength in nm and absorbance; UTF-8 text with or without a BOM is supported.
+- 2048 valid points by default (`EXPECTED_SPECTRUM_POINTS`), with a strictly increasing wavelength axis after optional reversal.
 - Finite numerical values.
 
 Previously present files are ignored. Incomplete or invalid files are retried. File modification time is used to assign spectra to conditions, so export should be prompt and timestamps must be consistent with the controlling computer.
@@ -407,6 +407,51 @@ Only accepted steady measurements are supplied to the optimiser. Failed measurem
 
 Reference: [scikit-optimize Bayesian optimisation example](https://scikit-optimize.github.io/stable/auto_examples/bayesian-optimization.html).
 
+## Diagnosing waiting after flushing
+
+Completing the flush starts the measurement window; it does not immediately produce a BO result. The controller still needs **15 usable post-flush spectra** whose conversion standard deviation is at most **0.02**. It waits up to **600 seconds after flushing**, then rejects an unsuccessful condition.
+
+The terminal now reports:
+
+- The configured spectra folder and filename pattern.
+- A flushing countdown and file-scan summary approximately every 15 seconds (`PROGRESS_LOG_S`).
+- An explicit **Flush complete** message.
+- Each new spectrum's filename, phase, analysis status, concentration, conversion, and usable post-flush count.
+- Measurement progress, conversion standard deviation, remaining time, and file-scan counts.
+- Invalid/incomplete-file reasons, retried without weakening data checks.
+
+The default pattern is now `*OnlineUVVisHVN*.txt`. It matches both `OnlineUVVisHVN_Absorbance.txt` and timestamp-prefixed exports such as `1791544248160_OnlineUVVisHVN_Absorbance.txt`. The actual export must be a supported text spectrum; its prefix alone does not establish its format.
+
+### Check exports without starting hardware
+
+```bash
+python vanillin_all_in_one.py --check-spectra
+```
+
+For the modular edition:
+
+```bash
+python bo_loop.py --check-spectra
+```
+
+This mode does not connect to OPC or write hardware commands. It prints the configured folder/pattern, matching file count, the newest eligible candidate's name and age, and its analysis result. It inspects the newest matching file at least 0.5 seconds old when available, so a brand-new file still being saved does not hide an older completed export. The normal point-count, finite-data and wavelength-axis checks remain in force. No usable export returns a nonzero exit code and diagnostic messages.
+
+If no filenames match, diagnostics show example filenames from the folder, including other extensions such as `.rmn`. The text-spectrum reader does not parse RMN/JSON files.
+
+| Message | Meaning / next check |
+| --- | --- |
+| `matched=0` | Check the folder, complete filename, extension, and whether text export is enabled. |
+| `seen_or_ignored` increases but no new result | Existing files are already processed or excluded. Acquisition must save a distinct new filename per spectrum. |
+| `writing` | The file is less than 0.5 seconds old; it will be retried. |
+| `invalid` or `unreadable` | Read the accompanying reason; check point count, file completion, numeric values, and axis. |
+| `status=no_edge`, `no_clear_edge`, or `no_data` | Files are found but do not provide a usable concentration with the current analysis. Check the spectrum and calibration. |
+| Usable count below 15 | More accepted post-flush spectra are required. Check the export interval. |
+| Count reaches 15 but standard deviation exceeds 0.02 | The latest measurement window is not yet steady; collection continues. |
+
+If acquisitions are slow, ensure `MAX_MEASURE_S` allows enough time to collect the required spectra. Do not treat missing or invalid spectra as complete conversion.
+
+Edit the file actually being executed: running `vanillin_all_in_one.py` does not use operating settings from an open `run_all.py` editor.
+
 ## Output files
 
 Files are saved beside the Python script:
@@ -431,5 +476,7 @@ Files are saved beside the Python script:
 The scikit-optimize version passed **12 offline checks**, including calibration conversions, real GP/EI proposals inside bounds, objective-sign handling, simulated experiment timing, transient logging, shutdown paths, and standalone command-line operation.
 
 The setpoint-only voltage implementation is checked offline for voltage/current write ordering, concurrent enable, absence of pump/voltage X1 access and PSU status reads, setpoint-only CSV columns, voltage reset on shutdown, 25 V command limits, and CLI behaviour. These checks do not validate the site's OPC tag mapping, physical pump motion, or voltage regulation.
+
+The export/progress update was tested with timestamp-prefixed and plain filenames, UTF-8 BOM input, incomplete files and retry, absent exports, unusable edges, nonsteady measurements, flush/measurement transitions, and hardware-free export inspection. Previously removed pump/voltage/PSU-status feedback reads remain removed.
 
 **Physical pump, PSU, and spectrometer operation has not been validated by these offline checks.**
