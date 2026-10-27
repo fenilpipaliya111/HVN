@@ -120,12 +120,11 @@ PSU_ON, PSU_SET = ('POWERSUPPLY.ON', 'POWERSUPPLY.W2')
 PSU_VOLTAGE_SET = "POWERSUPPLY.W1"
 
 ANODE_K = 0.5071118969420833
+# User-requested water calibration for BOTH pumps: flow [mL/min] = ANODE_K * RPM.
 
-CATHODE_RPM = (10.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0)
 
-CATHODE_FLOW = (2.8666666666666667, 14.373333333333335, 26.073333333333334, 44.20666666666667, 60.67666666666667, 77.57, 98.47333333333334)
 
-PUMP_CAL = {'cathode': {'rpm_min': 10.0, 'rpm_max': 300.0}, 'anode': {'rpm_min': 5.0, 'rpm_max': 300.0}}
+PUMP_CAL = {'cathode': {'rpm_min': 5.0, 'rpm_max': 300.0}, 'anode': {'rpm_min': 5.0, 'rpm_max': 300.0}}
 
 # =================== UV-VIS SETTINGS ===================
 METHOD = 'crossing'
@@ -206,7 +205,7 @@ def flow_to_rpm(flow, pump):
     c = PUMP_CAL[pump]
     if not isfinite(flow) or flow <= 0:
         raise ValueError('flow must be finite and positive')
-    rpm = flow / ANODE_K if pump == 'anode' else interpolate(flow, CATHODE_FLOW, CATHODE_RPM)
+    rpm = flow / ANODE_K
     if not c['rpm_min'] - 1e-09 <= rpm <= c['rpm_max'] + 1e-09:
         raise ValueError(f'{pump}: {flow} mL/min outside measured calibration')
     return min(c['rpm_max'], max(c['rpm_min'], rpm))
@@ -217,9 +216,7 @@ def rpm_to_flow(rpm, pump):
         raise ValueError('RPM must be finite')
     if rpm == 0:
         return 0.0
-    if pump == 'anode':
-        return ANODE_K * rpm
-    return interpolate(rpm, CATHODE_RPM, CATHODE_FLOW)
+    return ANODE_K * rpm
 
 # =================== COMMUNICATION / START / STOP ===================
 class ConnectionLost(Exception):
