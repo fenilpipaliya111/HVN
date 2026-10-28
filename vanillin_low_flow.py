@@ -24,11 +24,13 @@ Spectrum reading starts only after flushing; the first 15 usable spectra train B
 No steadiness requirement is applied.
 Productivity is vanillin consumed, not independently measured product yield.
 """
+import os
+import sys
+import threading
 import argparse
 import asyncio
 import csv
 import logging
-import os
 import time
 import warnings
 from bisect import bisect_right
@@ -612,8 +614,86 @@ def flush_seconds(q, first_experiment):
     volumes = FIRST_EXPERIMENT_VOLUMES if first_experiment else LATER_EXPERIMENT_VOLUMES
     return volumes * CATHODE_VOLUME_ML / q * 60.0
 
+
+class ExperimentSkipped(Exception):
+    """Operator requested a new condition; do not train on this experiment."""
+
+
+class SkipControl:
+    """Daemon console reader; requests apply only to the active experiment."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.active = False
+        self.requested = False
+        self.closed = False
+
+    def arm(self):
+        with self.lock:
+            self.requested = False
+            self.active = True
+
+    def disarm(self):
+        with self.lock:
+            self.active = False
+            self.requested = False
+
+    def request(self):
+        with self.lock:
+            if self.active and not self.closed:
+                self.requested = True
+
+    def check(self):
+        with self.lock:
+            if self.requested:
+                self.requested = False
+                raise ExperimentSkipped()
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            self.active = False
+
+    def start(self):
+        threading.Thread(target=self._read_console, daemon=True).start()
+
+    def _read_console(self):
+        try:
+            if os.name == "nt":
+                import msvcrt
+                while not self.closed:
+                    if msvcrt.kbhit():
+                        key = msvcrt.getwch()
+                        if key in ("\x00", "\xe0"):
+                            msvcrt.getwch()
+                        elif key.lower() == "s":
+                            self.request()
+                    time.sleep(0.05)
+            else:
+                while not self.closed:
+                    line = sys.stdin.readline()
+                    if not line:
+                        return
+                    if line.strip().lower() == "s":
+                        self.request()
+        except (OSError, ValueError):
+            return
+
+
+def next_unskipped_condition(opt, skipped, rng):
+    """Avoid repeating skipped conditions without inventing BO observations."""
+    candidate = list(map(float, opt.ask()))
+    for _ in range(1000):
+        if not any(np.allclose(candidate, old, rtol=0, atol=1e-6) for old in skipped):
+            return candidate
+        candidate = list(map(float, opt.space.rvs(n_samples=1, random_state=rng)[0]))
+    raise RuntimeError("Could not select a different condition after skipping")
+
+
 async def run_experiment(link, spectra, q, charge, current, state, spec_writer, it):
     rpm1, rpm2 = (flow_to_rpm(q, 'cathode'), flow_to_rpm(q, 'anode'))
+    control = state.get("skip_control")
+    if control is not None:
+        control.arm()
     t_change = time.time()
     first_experiment = not state['condition_started']
     await apply_setpoints(link, rpm1, rpm2, current, state)
@@ -626,6 +706,8 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
     flush_announced = False
     next_progress = 0.0
     while time.time() < deadline:
+        if control is not None:
+            control.check()
         now = time.time()
         if now < t_measure:
             if now >= next_progress:
@@ -650,6 +732,8 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
             message("Spectrum %s [%s]: status=%s, c=%s M, conversion=%s, usable post-flush=%d/%d",
                     name, "measurement" if eligible else "flushing", res["status"],
                     concentration, conversion, min(len(records), MEASURE_SPECTRA), MEASURE_SPECTRA)
+        if control is not None:
+            control.check()
         if len(records) >= MEASURE_SPECTRA:
             xs = [x for _, x in records[:MEASURE_SPECTRA]]
             x_mean, x_std = (mean(xs), std(xs))
@@ -743,7 +827,10 @@ async def run():
     log.info('History: %s', hist_path)
     link = Link()
     spectra = Spectra(SPECTRA_FOLDER, SPECTRA_GLOB)
-    state = {'condition_started': False, 'I': 0.0}
+    control = SkipControl()
+    state = {'condition_started': False, 'I': 0.0, 'skip_control': control}
+    skipped = []
+    skip_rng = np.random.RandomState(RANDOM_SEED + 1000)
     reason, normal = ('finished', False)
     campaign_mono = time.monotonic()
     failed = 0
@@ -752,19 +839,28 @@ async def run():
         await link.connect()
         if abs(float(await link.read(PUMP1_SET))) > 0.05 or abs(float(await link.read(PUMP2_SET))) > 0.05:
             raise RuntimeError('a pump has a nonzero setpoint - stop it first (python vanillin_low_flow.py --stop)')
+        control.start()
+        log.info("SKIP: press S in this terminal (Enter also works). Ctrl+C stops the campaign.")
         for it in range(done + 1, total + 1):
             if time.monotonic() - campaign_mono >= MAX_TOTAL_H * 3600:
                 reason, normal = ('maximum campaign time reached', True)
                 break
             phase = 'initial' if it <= N_INITIAL else 'bayes'
-            q, current = map(float, opt.ask())
+            q, current = next_unskipped_condition(opt, skipped, skip_rng)
             ch = charge_for(q, current)
             remaining = MAX_TOTAL_H * 3600 - (time.monotonic() - campaign_mono)
             try:
                 res = await asyncio.wait_for(run_experiment(link, spectra, q, ch, current, state, spec_w, it), remaining)
+            except ExperimentSkipped:
+                control.disarm()
+                skipped.append([q, current])
+                spec_f.flush()
+                log.warning("experiment %d SKIPPED by operator; no BO score recorded. Selecting a different condition; next flush is 2.5 volumes.", it)
+                continue
             except asyncio.TimeoutError:
                 reason, normal = ('maximum campaign time reached', True)
                 break
+            control.disarm()
             spec_f.flush()
             if res is None:
                 failed += 1
@@ -786,6 +882,7 @@ async def run():
         log.exception('campaign stopped by an error')
         raise
     finally:
+        control.close()
         await safe_shutdown(link, reason, normal)
         await link.close()
         hist_f.close()
