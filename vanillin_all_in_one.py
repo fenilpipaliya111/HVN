@@ -16,7 +16,7 @@ Both pumps and PSU enable are commanded concurrently, without ramp waits;
 exact physical simultaneous actuation is not guaranteed. The current setpoint
 is prepared before enable. First condition: 1.5 volumes, later: 2.5 volumes.
 At 70 mL and 5 mL/min, this is 21 min initially and 35 min subsequently.
-Spectra log immediately; the first 15 usable post-flush spectra train BO.
+Spectrum reading starts only after flushing; the first 15 usable spectra train BO.
 No steadiness requirement is applied.
 Productivity is vanillin consumed, not independently measured product yield.
 """
@@ -623,12 +623,18 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
     next_progress = 0.0
     while time.time() < deadline:
         now = time.time()
-        if now >= t_measure and not flush_announced:
+        if now < t_measure:
+            if now >= next_progress:
+                log.info("Flushing: %.1f s remaining; spectrum reading paused", t_measure-now)
+                next_progress = now + PROGRESS_LOG_S
+            await asyncio.sleep(min(POLL_S, t_measure-now))
+            continue
+        if not flush_announced:
             log.info("Flush complete. Collecting %d usable spectra; no steadiness wait. Measurement timeout %.0f s.",
                          MEASURE_SPECTRA, MAX_MEASURE_S)
             flush_announced = True
             next_progress = 0.0
-        for mt, name, res in spectra.poll(since=t_change):
+        for mt, name, res in spectra.poll(since=t_measure):
             x = conversion_of(res)
             eligible = time.time() >= t_measure and mt >= t_measure
             spec_writer.writerow([datetime.now().astimezone().isoformat(), it, name, res['status'], res['wavelength_nm'], res['conc_M'], x, 'measurement' if eligible else 'flushing', q, current, charge, VOLTAGE_LIMIT_V])
