@@ -318,12 +318,12 @@ async def run():
 
     log.info("Run settings: %.2f mL/min -> cathode %.2f rpm, anode %.2f rpm, %.3f A",
              FLOW_ML_MIN, rpm1, rpm2, CURRENT_A)
-    log.info("Transport reference (spectra log immediately): %.2f mL / %.2f mL/min x %.2f = %.0f s",
+    log.info("Transport wait (spectrum reading paused): %.2f mL / %.2f mL/min x %.2f = %.0f s",
              CATHODE_VOLUME_ML, FLOW_ML_MIN, DELAY_FACTOR, delay_s)
     log.info("Maximum run time: %.2f h%s", max_run_s / 3600.0, "  (DRY RUN)" if DRY_RUN else "")
 
     if DRY_RUN:
-        log.info("DRY RUN: no OPC connection or writes. Immediate spectra logging; transport %.0f s", delay_s)
+        log.info("DRY RUN: no OPC connection or writes. Spectrum reading after transport %.0f s", delay_s)
         return
     lv.DRY_RUN = False
     csv_path = OUTPUT_FOLDER / f"uvvis_{stamp}.csv"
