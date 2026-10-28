@@ -15,7 +15,7 @@ Keep these files together in the same folder:
 | `lv.py` | OPC UA tags, pump calibration, flow/RPM conversion, and low-level reads/writes |
 | `uvvis.py` | Spectrum parsing, A = 0.75 edge analysis, and concentration calibration |
 | `run_all.py` | Shared connection/start/shutdown helpers and an optional fixed-condition runner |
-| `bo_loop.py` | scikit-optimize ask/tell loop, flushing, steady measurements, objectives, and CSV history |
+| `bo_loop.py` | scikit-optimize ask/tell loop, flushing, 15-spectrum measurements, objectives, and CSV history |
 | `stop.py` | Manual shutdown entry point |
 | `requirements.txt` | Dependencies for either edition |
 
@@ -172,7 +172,7 @@ Every step is attempted even if an earlier shutdown write fails. Inspect the log
 5. Submit both pump commands and the PSU-enable command concurrently, with no programmed pause or pump-ramp wait.
 6. Analyse and log new spectra immediately, marking flush-period rows as `flushing`.
 7. Wait the appropriate transported volume before collecting spectra for the BO result.
-8. Accept a measurement when the latest 15 usable post-flush spectra meet the steadiness threshold.
+8. Accept a measurement as soon as the first 15 usable post-flush spectra have been collected, regardless of their variation.
 9. Calculate conversion, consumed-vanillin productivity, and the objective.
 10. Update the optimiser using `Optimizer.tell()`.
 11. Repeat until completion, timeout, interruption, or a fault; then request shutdown.
@@ -403,13 +403,13 @@ optimizer.tell([flow, current], -score)
 
 **scikit-optimize minimises**, so the maximisation score is negated before `tell()`. CSV history retains the positive experimental score, and the reported best condition reverses the sign again.
 
-Only accepted steady measurements are supplied to the optimiser. Failed measurements are not assigned an invented score. Without a new observation, the optimiser may propose the same condition again.
+Measurements containing 15 usable post-flush spectra are supplied to the optimiser; steadiness is not required. Failed measurements are not assigned an invented score. Without a new observation, the optimiser may propose the same condition again.
 
 Reference: [scikit-optimize Bayesian optimisation example](https://scikit-optimize.github.io/stable/auto_examples/bayesian-optimization.html).
 
 ## Diagnosing waiting after flushing
 
-Completing the flush starts the measurement window; it does not immediately produce a BO result. The controller still needs **15 usable post-flush spectra** whose conversion standard deviation is at most **0.02**. It waits up to **600 seconds after flushing**, then rejects an unsuccessful condition.
+Completing the flush starts the measurement window; it does not immediately produce a BO result. The controller needs the first **15 usable post-flush spectra**, then averages their conversions and proceeds immediately. Conversion standard deviation is logged for information only; it does not delay acceptance. The legacy `steady` CSV column is blank because steadiness is not assessed. It waits up to **600 seconds after flushing**, then rejects an unsuccessful condition.
 
 The terminal now reports:
 
@@ -446,7 +446,7 @@ If no filenames match, diagnostics show example filenames from the folder, inclu
 | `invalid` or `unreadable` | Read the accompanying reason; check point count, file completion, numeric values, and axis. |
 | `status=no_edge`, `no_clear_edge`, or `no_data` | Files are found but do not provide a usable concentration with the current analysis. Check the spectrum and calibration. |
 | Usable count below 15 | More accepted post-flush spectra are required. Check the export interval. |
-| Count reaches 15 but standard deviation exceeds 0.02 | The latest measurement window is not yet steady; collection continues. |
+| Count reaches 15 | The measurement is accepted regardless of standard deviation; BO selects the next condition. |
 
 If acquisitions are slow, ensure `MAX_MEASURE_S` allows enough time to collect the required spectra. Do not treat missing or invalid spectra as complete conversion.
 
@@ -466,7 +466,7 @@ Files are saved beside the Python script:
 
 - Pump operation is controlled by setpoints only; actual RPM is not read and there is no speed-tolerance shutdown.
 - PSU on/off status is not read or monitored. The controller still sends enable/disable commands, but does not verify the physical output state.
-- Conditions without sufficient steady usable spectra within the measurement window are rejected.
+- Conditions without 15 usable post-flush spectra within the measurement window are rejected.
 - Three consecutive failed conditions stop the campaign.
 - The campaign deadline requests shutdown even during flushing; communication and cleanup can take additional time.
 - On Windows, the script requests that the computer remain awake during the campaign.
