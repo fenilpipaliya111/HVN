@@ -170,7 +170,7 @@ Every step is attempted even if an earlier shutdown write fails. Inspect the log
 3. Convert the shared flow target into separate calibrated cathode and anode RPM commands.
 4. Prepare the voltage ceiling (25 V by default) and the requested current setpoint.
 5. Submit both pump commands and the PSU-enable command concurrently, with no programmed pause or pump-ramp wait.
-6. Analyse and log new spectra immediately, marking flush-period rows as `flushing`.
+6. Pause spectrum reading during flushing; display a countdown.
 7. Wait the appropriate transported volume before collecting spectra for the BO result.
 8. Accept a measurement as soon as the first 15 usable post-flush spectra have been collected, regardless of their variation.
 9. Calculate conversion, consumed-vanillin productivity, and the objective.
@@ -193,7 +193,7 @@ delay_minutes = number_of_volumes × 70 / flow_mL_min
 | 10 mL/min | 10.5 minutes | 17.5 minutes |
 | 20 mL/min | 5.25 minutes | 8.75 minutes |
 
-The delay begins after the setpoint commands complete. Spectra are analysed and logged during the delay, but those rows are excluded from the BO measurement.
+The delay begins after the setpoint commands complete. Python does not read or analyse spectrum files during flushing. After flushing, it ignores files timestamped before the flush completed and collects 15 new usable spectra.
 
 The first condition after each campaign startup uses 1.5 volumes, including when resuming a saved history. Subsequent conditions use 2.5 volumes. A condition that started successfully but failed spectral acceptance still counts as a started condition, so the following condition uses 2.5 volumes.
 
@@ -414,7 +414,7 @@ Completing the flush starts the measurement window; it does not immediately prod
 The terminal now reports:
 
 - The configured spectra folder and filename pattern.
-- A flushing countdown and file-scan summary approximately every 15 seconds (`PROGRESS_LOG_S`).
+- A flushing countdown approximately every 15 seconds (`PROGRESS_LOG_S`), followed by file-scan summaries during measurement.
 - An explicit **Flush complete** message.
 - Each new spectrum's filename, phase, analysis status, concentration, conversion, and usable post-flush count.
 - Measurement progress, conversion standard deviation, remaining time, and file-scan counts.
@@ -459,7 +459,7 @@ Files are saved beside the Python script:
 | File | Contents |
 | --- | --- |
 | `bo_history_<timestamp>.csv` | Accepted conditions, flow, current, charge, conversion, productivity, objective, and voltage setpoint |
-| `bo_spectra_<timestamp>.csv` | Per-spectrum analysis and voltage setpoint, including `flushing` and `measurement` rows |
+| `bo_spectra_<timestamp>.csv` | Post-flush per-spectrum analysis and voltage setpoint; no flush-period rows |
 | `run_<timestamp>.log` | Proposed conditions, operating events, warnings, and shutdown results |
 
 ## Monitoring and limits
