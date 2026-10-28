@@ -218,12 +218,18 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
     next_progress = 0.0
     while time.time() < deadline:
         now = time.time()
-        if now >= t_measure and not flush_announced:
+        if now < t_measure:
+            if now >= next_progress:
+                run_all.log.info("Flushing: %.1f s remaining; spectrum reading paused", t_measure-now)
+                next_progress = now + PROGRESS_LOG_S
+            await asyncio.sleep(min(POLL_S, t_measure-now))
+            continue
+        if not flush_announced:
             run_all.log.info("Flush complete. Collecting %d usable spectra; no steadiness wait. Measurement timeout %.0f s.",
                          MEASURE_SPECTRA, MAX_MEASURE_S)
             flush_announced = True
             next_progress = 0.0
-        for mt, name, res in spectra.poll(since=t_change):
+        for mt, name, res in spectra.poll(since=t_measure):
             x = conversion_of(res)
             eligible = time.time() >= t_measure and mt >= t_measure
             spec_writer.writerow([datetime.now().astimezone().isoformat(), it, name, res['status'], res['wavelength_nm'], res['conc_M'], x, 'measurement' if eligible else 'flushing', q, current, charge, VOLTAGE_LIMIT_V])
