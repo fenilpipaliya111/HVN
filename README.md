@@ -480,3 +480,8 @@ The setpoint-only voltage implementation is checked offline for voltage/current 
 The export/progress update was tested with timestamp-prefixed and plain filenames, UTF-8 BOM input, incomplete files and retry, absent exports, unusable edges, nonsteady measurements, flush/measurement transitions, and hardware-free export inspection. Previously removed pump/voltage/PSU-status feedback reads remain removed.
 
 **Physical pump, PSU, and spectrometer operation has not been validated by these offline checks.**
+
+
+## Skip an experiment
+
+In the terminal running any BO version, press **S** on Windows (or type **S then Enter** on other systems). The controller checks the request during flushing and measurement; a device write already in progress finishes first. It then selects a different condition and applies the usual 2.5-volume flush. Skipped attempts count toward the campaign attempt limit, retain any already logged spectra, and add no result or score to BO history. If skopt repeats a skipped proposal, a random in-range condition is used instead. Requests between experiments are ignored. Ctrl+C still stops the whole campaign and requests shutdown. Use an interactive terminal for keyboard input.
