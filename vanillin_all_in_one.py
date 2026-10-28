@@ -16,7 +16,8 @@ Both pumps and PSU enable are commanded concurrently, without ramp waits;
 exact physical simultaneous actuation is not guaranteed. The current setpoint
 is prepared before enable. First condition: 1.5 volumes, later: 2.5 volumes.
 At 70 mL and 5 mL/min, this is 21 min initially and 35 min subsequently.
-Spectra log immediately; only post-flush steady spectra train BO.
+Spectra log immediately; the first 15 usable post-flush spectra train BO.
+No steadiness requirement is applied.
 Productivity is vanillin consumed, not independently measured product yield.
 """
 import argparse
@@ -89,7 +90,7 @@ LATER_EXPERIMENT_VOLUMES = 2.5
 
 MEASURE_SPECTRA = 15
 
-STEADY_TOL_X = 0.02
+
 
 MAX_MEASURE_S = 600
 
@@ -623,15 +624,15 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
     while time.time() < deadline:
         now = time.time()
         if now >= t_measure and not flush_announced:
-            log.info("Flush complete. Collecting %d usable spectra; conversion std must be <= %.4f. Measurement timeout %.0f s.",
-                         MEASURE_SPECTRA, STEADY_TOL_X, MAX_MEASURE_S)
+            log.info("Flush complete. Collecting %d usable spectra; no steadiness wait. Measurement timeout %.0f s.",
+                         MEASURE_SPECTRA, MAX_MEASURE_S)
             flush_announced = True
             next_progress = 0.0
         for mt, name, res in spectra.poll(since=t_change):
             x = conversion_of(res)
             eligible = time.time() >= t_measure and mt >= t_measure
             spec_writer.writerow([datetime.now().astimezone().isoformat(), it, name, res['status'], res['wavelength_nm'], res['conc_M'], x, 'measurement' if eligible else 'flushing', q, current, charge, VOLTAGE_LIMIT_V])
-            if eligible and x is not None:
+            if eligible and x is not None and len(records) < MEASURE_SPECTRA:
                 records.append((mt, x))
             concentration = "n/a" if res["conc_M"] is None else f"{res['conc_M']:.6g}"
             conversion = "n/a" if x is None else f"{100*x:.2f}%"
@@ -640,13 +641,12 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
                     name, "measurement" if eligible else "flushing", res["status"],
                     concentration, conversion, min(len(records), MEASURE_SPECTRA), MEASURE_SPECTRA)
         if len(records) >= MEASURE_SPECTRA:
-            xs = [x for _, x in records[-MEASURE_SPECTRA:]]
-            if std(xs) <= STEADY_TOL_X:
-                x_mean, x_std = (mean(xs), std(xs))
-                prod = x_mean * FEED_CONC_M * q * 60.0
-                p_ref = FEED_CONC_M * flow_limits()[1] * 60.0
-                j = W_CONVERSION * x_mean + W_PRODUCTIVITY * prod / p_ref if OBJECTIVE == 'weighted' else prod / p_ref - W_PENALTY * max(0.0, CONVERSION_TARGET - x_mean)
-                return {'X': x_mean, 'X_std': x_std, 'steady': True, 'n': len(xs), 'P': prod, 'FE': '', 'J': j, 't_start': t_change, 'target_met': x_mean >= CONVERSION_TARGET}
+            xs = [x for _, x in records[:MEASURE_SPECTRA]]
+            x_mean, x_std = (mean(xs), std(xs))
+            prod = x_mean * FEED_CONC_M * q * 60.0
+            p_ref = FEED_CONC_M * flow_limits()[1] * 60.0
+            j = W_CONVERSION * x_mean + W_PRODUCTIVITY * prod / p_ref if OBJECTIVE == 'weighted' else prod / p_ref - W_PENALTY * max(0.0, CONVERSION_TARGET - x_mean)
+            return {'X': x_mean, 'X_std': x_std, 'steady': None, 'n': len(xs), 'P': prod, 'FE': '', 'J': j, 't_start': t_change, 'target_met': x_mean >= CONVERSION_TARGET}
         now = time.time()
         if now >= next_progress:
             if now < t_measure:
@@ -654,15 +654,15 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
             else:
                 xs = [x for _, x in records[-MEASURE_SPECTRA:]]
                 spread = "n/a" if len(xs) < 2 else f"{std(xs):.4f}"
-                log.info("Measurement: usable=%d/%d, conversion std=%s (limit %.4f), %.0f s remaining; %s",
+                log.info("Measurement: usable=%d/%d, conversion std=%s (diagnostic only), %.0f s remaining; %s",
                              min(len(records), MEASURE_SPECTRA), MEASURE_SPECTRA, spread,
-                             STEADY_TOL_X, max(0., deadline-now), spectra.diagnostic_summary())
+                             max(0., deadline-now), spectra.diagnostic_summary())
                 if spectra.last_scan.get("matched", 0) == 0:
                     log.warning("No spectrum files match %s in %s. Check the export folder, filename pattern and TXT saving.",
                                    spectra.pattern, spectra.folder)
             next_progress = now + PROGRESS_LOG_S
         await asyncio.sleep(POLL_S)
-    log.warning("experiment %d rejected: %d usable post-flush spectra; need %d steady spectra. %s",
+    log.warning("experiment %d rejected: %d usable post-flush spectra; need %d usable spectra. %s",
                     it, len(records), MEASURE_SPECTRA, spectra.diagnostic_summary())
     return None
 
