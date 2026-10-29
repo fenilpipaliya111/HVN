@@ -4,6 +4,7 @@ Edit the SETTINGS block, then start:   python run_all.py
 Needs lv.py and uvvis.py in the same folder. Nothing asks for input while it runs.
 This is a fixed-condition runner; use bo_loop.py for Bayesian optimisation.
 """
+import math
 import asyncio
 import csv
 import logging
@@ -51,7 +52,7 @@ log = logging.getLogger("run")
 
 CSV_HEADER = ["time_iso", "t_since_pump_start_s", "file", "pump1_setpoint_rpm", "pump2_setpoint_rpm",
               "psu_current_setpoint_A", "voltage_setpoint_V", "edge_wavelength_nm", "concentration_M",
-              "conversion", "status", "band_points", "band_span_nm", "max_absorbance"]
+              "conversion", "status", "band_points", "band_span_nm", "max_absorbance", "apparent_hvn_FE_percent", "apparent_hvn_FE_above_100"]
 
 
 class ConnectionLost(Exception):
@@ -197,6 +198,22 @@ async def read_process(link):
     return out
 
 
+
+def apparent_hydrovanilloin_fe_percent(conversion, charge_f_mol):
+    """Conversion-based estimate, assuming all consumed vanillin forms HVN.
+    
+    HVN needs 2 electrons per dimer = 1 electron per vanillin molecule.
+    This uses commanded flow/current, not measured product Faradaic efficiency.
+    Values above 100% are retained for diagnosis, never clipped.
+    """
+    if conversion is None or charge_f_mol is None:
+        return None
+    x, charge = float(conversion), float(charge_f_mol)
+    if not math.isfinite(x) or not math.isfinite(charge) or not 0 <= x <= 1 or charge <= 0:
+        return None
+    return 100.0 * x / charge
+
+
 async def uvvis_loop(link, writer, fh, t_pump1, arrival_ts):
     folder = Path(SPECTRA_FOLDER)
     seen, tries = set(), {}
@@ -251,6 +268,13 @@ async def uvvis_loop(link, writer, fh, t_pump1, arrival_ts):
                 seen.add(p.name)
                 res = uvvis.analyse(wl, ab, FEED_CONC_M)
                 proc = await read_process(link)
+                charge = (CURRENT_A * 60000.0 / (96485.33 * FEED_CONC_M * FLOW_ML_MIN)
+                          if FEED_CONC_M is not None and FEED_CONC_M > 0 else None)
+                apparent_fe = apparent_hydrovanilloin_fe_percent(res["conversion"], charge)
+                if apparent_fe is not None:
+                    log.info("Apparent HVN FE (conversion-based; commanded flow/current): %.2f %%", apparent_fe)
+                    if apparent_fe > 100.0:
+                        log.warning("Apparent HVN FE exceeds 100%%: %.2f %%; not measured product FE", apparent_fe)
 
                 def fmt(v, nd):
                     return "" if v is None else round(v, nd)
@@ -260,7 +284,8 @@ async def uvvis_loop(link, writer, fh, t_pump1, arrival_ts):
                     round(mtime - t_pump1, 1), p.name, *proc,
                     fmt(res["wavelength_nm"], 2), fmt(res["conc_M"], 5),
                     fmt(res["conversion"], 4), res["status"],
-                    res["n_points"], round(res["span_nm"], 2), fmt(res["max_abs"], 3)])
+                    res["n_points"], round(res["span_nm"], 2), fmt(res["max_abs"], 3), fmt(apparent_fe, 3),
+                    None if apparent_fe is None else apparent_fe > 100.0])
                 fh.flush()
                 last_spec = time.time()
                 log.info("spectrum %s: edge %s nm, c = %s M, %s (highest absorbance %s)",
