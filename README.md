@@ -485,3 +485,14 @@ The export/progress update was tested with timestamp-prefixed and plain filename
 ## Skip an experiment
 
 In the terminal running any BO version, press **S** on Windows (or type **S then Enter** on other systems). The controller checks the request during flushing and measurement; a device write already in progress finishes first. It then selects a different condition and applies the usual 2.5-volume flush. Skipped attempts count toward the campaign attempt limit, retain any already logged spectra, and add no result or score to BO history. If skopt repeats a skipped proposal, a random in-range condition is used instead. Requests between experiments are ignored. Ctrl+C still stops the whole campaign and requests shutdown. Use an interactive terminal for keyboard input.
+
+
+## Hydrovanilloin apparent Faradaic efficiency
+
+All BO versions and the optional fixed-condition runner record `apparent_hvn_FE_percent` and `apparent_hvn_FE_above_100` in their CSV outputs. BO history reports the value from the average conversion of 15 post-flush usable spectra; per-spectrum CSVs also contain the estimate for each usable spectrum. Unusable spectra leave both fields blank.
+
+Hydrovanilloin requires 2 electrons per dimer, or 1 electron per vanillin molecule. The conversion-based estimate is `100 * conversion / charge_F_mol`, where `charge_F_mol = current_A * 60000 / (96485.33 * feed_M * flow_mL_min)`. It assumes all consumed vanillin forms hydrovanilloin and uses commanded current/flow. It is **not measured product Faradaic efficiency**. Actual product FE requires product amount/selectivity and measured charge. The legacy `faradaic_eff_not_measured` column remains blank.
+
+Values above 100% are preserved and flagged, with a terminal warning after each accepted BO experiment. They do not change the BO objective, reject the experiment or alter its conversion. Check concentration calibration, actual current/flow, carryover and other sources of vanillin disappearance. If the hydrovanilloin selectivity on a consumed-vanillin basis is independently measured, the corresponding estimate is apparent FE times that selectivity fraction. Existing CSVs are not modified.
+
+The product-based expression is `FE_percent = 100 * 2 * F * moles_hydrovanilloin / measured_charge_C`. The factor 2 is per hydrovanilloin molecule. At assumed 100% selectivity, `moles_hydrovanilloin = moles_vanillin_fed * conversion / 2`, so the factors of 2 cancel when using vanillin conversion and F/mol of vanillin fed.
