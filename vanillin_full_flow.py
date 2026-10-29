@@ -27,6 +27,7 @@ Productivity is vanillin consumed, not independently measured product yield.
 import os
 import sys
 import threading
+import math
 import argparse
 import asyncio
 import csv
@@ -176,7 +177,7 @@ FARADAY = 96485.33
 K_AMP = FARADAY * (FEED_CONC_M or 0) / 60000.0
 
 HIST_HEADER = ['time_iso', 'iteration', 'phase', 'Q_mL_min', 'charge_F_mol', 'I_A', 'conversion', 'conversion_std', 'steady', 'n_spectra', 'productivity_mmol_h', 'productivity_mmol_h_cm2', 'current_density_mA_cm2', 'faradaic_eff_not_measured', 'target_met', 'objective']
-HIST_HEADER += ["voltage_setpoint_V"]
+HIST_HEADER += ["voltage_setpoint_V", "apparent_hvn_FE_percent", "apparent_hvn_FE_above_100"]
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
@@ -498,6 +499,22 @@ def analyse(wl, ab, feed_conc_m=None):
 def current_for(q, charge):
     return charge * K_AMP * q
 
+
+def apparent_hydrovanilloin_fe_percent(conversion, charge_f_mol):
+    """Conversion-based estimate, assuming all consumed vanillin forms HVN.
+    
+    HVN needs 2 electrons per dimer = 1 electron per vanillin molecule.
+    This uses commanded flow/current, not measured product Faradaic efficiency.
+    Values above 100% are retained for diagnosis, never clipped.
+    """
+    if conversion is None or charge_f_mol is None:
+        return None
+    x, charge = float(conversion), float(charge_f_mol)
+    if not math.isfinite(x) or not math.isfinite(charge) or not 0 <= x <= 1 or charge <= 0:
+        return None
+    return 100.0 * x / charge
+
+
 def charge_for(q, current):
     return current / (K_AMP * q)
 
@@ -723,8 +740,9 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
             next_progress = 0.0
         for mt, name, res in spectra.poll(since=t_measure):
             x = conversion_of(res)
+            apparent_fe = apparent_hydrovanilloin_fe_percent(x, charge)
             eligible = time.time() >= t_measure and mt >= t_measure
-            spec_writer.writerow([datetime.now().astimezone().isoformat(), it, name, res['status'], res['wavelength_nm'], res['conc_M'], x, 'measurement' if eligible else 'flushing', q, current, charge, VOLTAGE_LIMIT_V])
+            spec_writer.writerow([datetime.now().astimezone().isoformat(), it, name, res['status'], res['wavelength_nm'], res['conc_M'], x, 'measurement' if eligible else 'flushing', q, current, charge, VOLTAGE_LIMIT_V, apparent_fe, None if apparent_fe is None else apparent_fe > 100.0])
             if eligible and x is not None and len(records) < MEASURE_SPECTRA:
                 records.append((mt, x))
             concentration = "n/a" if res["conc_M"] is None else f"{res['conc_M']:.6g}"
@@ -741,7 +759,11 @@ async def run_experiment(link, spectra, q, charge, current, state, spec_writer, 
             prod = x_mean * FEED_CONC_M * q * 60.0
             p_ref = FEED_CONC_M * flow_limits()[1] * 60.0
             j = W_CONVERSION * x_mean + W_PRODUCTIVITY * prod / p_ref if OBJECTIVE == 'weighted' else prod / p_ref - W_PENALTY * max(0.0, CONVERSION_TARGET - x_mean)
-            return {'X': x_mean, 'X_std': x_std, 'steady': None, 'n': len(xs), 'P': prod, 'FE': '', 'J': j, 't_start': t_change, 'target_met': x_mean >= CONVERSION_TARGET}
+            apparent_fe = apparent_hydrovanilloin_fe_percent(x_mean, charge)
+            log.info("Apparent HVN FE (conversion-based, assuming 100%% selectivity; commanded flow/current): %.2f %%", apparent_fe)
+            if apparent_fe > 100.0:
+                log.warning("Apparent HVN FE exceeds 100%%: %.2f %%. Check concentration, actual flow/current and carryover; this is not measured product FE.", apparent_fe)
+            return {'apparent_FE_percent': apparent_fe, 'X': x_mean, 'X_std': x_std, 'steady': None, 'n': len(xs), 'P': prod, 'FE': '', 'J': j, 't_start': t_change, 'target_met': x_mean >= CONVERSION_TARGET}
         now = time.time()
         if now >= next_progress:
             if now < t_measure:
@@ -824,7 +846,7 @@ async def run():
             spec_f.flush()
     spec_w = FlushingWriter()
     hist_w.writerow(HIST_HEADER)
-    spec_w.writerow(['time_iso', 'iteration', 'file', 'status', 'edge_nm', 'concentration_M', 'conversion', 'phase', 'Q_mL_min', 'I_A', 'charge_F_mol', 'voltage_setpoint_V'])
+    spec_w.writerow(['time_iso', 'iteration', 'file', 'status', 'edge_nm', 'concentration_M', 'conversion', 'phase', 'Q_mL_min', 'I_A', 'charge_F_mol', 'voltage_setpoint_V', 'apparent_hvn_FE_percent', 'apparent_hvn_FE_above_100'])
     log.info('History: %s', hist_path)
     link = Link()
     spectra = Spectra(SPECTRA_FOLDER, SPECTRA_GLOB)
@@ -870,7 +892,7 @@ async def run():
                 continue
             failed = 0
             opt.tell([q, current], -res['J'])  # Minimise the negative score.
-            hist_w.writerow([datetime.now().isoformat(timespec='seconds'), it, phase, round(q, 3), round(ch, 3), round(current, 3), round(res['X'], 4), round(res['X_std'], 4), res['steady'], res['n'], round(res['P'], 3), round(res['P'] / ELECTRODE_AREA_CM2, 5), round(1000.0 * current / ELECTRODE_AREA_CM2, 1), res['FE'], res['target_met'], round(res['J'], 4), VOLTAGE_LIMIT_V])
+            hist_w.writerow([datetime.now().isoformat(timespec='seconds'), it, phase, round(q, 3), round(ch, 3), round(current, 3), round(res['X'], 4), round(res['X_std'], 4), res['steady'], res['n'], round(res['P'], 3), round(res['P'] / ELECTRODE_AREA_CM2, 5), round(1000.0 * current / ELECTRODE_AREA_CM2, 1), res['FE'], res['target_met'], round(res['J'], 4), VOLTAGE_LIMIT_V, round(res['apparent_FE_percent'], 3), res['apparent_FE_percent'] > 100.0])
             hist_f.flush()
             log.info('experiment %d done: conversion %.1f %% (target %.0f %%: %s), productivity %.2f mmol/h consumed vanillin, objective %.3f', it, 100 * res['X'], 100 * CONVERSION_TARGET, 'met' if res['target_met'] else 'NOT met', res['P'], res['J'])
         else:
