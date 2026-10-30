@@ -9,16 +9,12 @@ PUMP2_SET = "PUMP2.W1"  # Anode RPM setpoint.
 PSU_ON, PSU_SET = "POWERSUPPLY.ON", "POWERSUPPLY.W2"
 PSU_VOLTAGE_SET = "POWERSUPPLY.W1"
 
-# New labdos calibration: rpm versus mean flow (mL/min).
+# Shared user-requested anode water calibration for both pumps: mL/min = ANODE_K * RPM.
 from math import isfinite
 from bisect import bisect_right
 ANODE_K = 0.5071118969420833
-CATHODE_RPM = (10., 50., 100., 150., 200., 250., 300.)
-CATHODE_FLOW = (2.8666666666666667, 14.373333333333335,
-                26.073333333333334, 44.20666666666667,
-                60.67666666666667, 77.57, 98.47333333333334)
 CAL = {
-    "cathode": {"rpm_min": 10., "rpm_max": 300.},
+    "cathode": {"rpm_min": 5., "rpm_max": 300.},
     "anode": {"rpm_min": 5., "rpm_max": 300.},
 }
 
@@ -64,7 +60,7 @@ def flow_to_rpm(flow, pump):
     c = CAL[pump]
     if not isfinite(flow) or flow <= 0:
         raise ValueError("flow must be finite and positive")
-    rpm = flow / ANODE_K if pump == "anode" else interpolate(flow, CATHODE_FLOW, CATHODE_RPM)
+    rpm = flow / ANODE_K
     if not c["rpm_min"] - 1e-9 <= rpm <= c["rpm_max"] + 1e-9:
         raise ValueError(f"{pump}: {flow} mL/min outside measured calibration")
     # Do not silently quantize: pump must support floating point RPM commands.
@@ -77,9 +73,7 @@ def rpm_to_flow(rpm, pump):
         raise ValueError("RPM must be finite")
     if rpm == 0:
         return 0.0
-    if pump == "anode":
-        return ANODE_K * rpm
-    return interpolate(rpm, CATHODE_RPM, CATHODE_FLOW)
+    return ANODE_K * rpm
 
 
 async def shutdown(client):
