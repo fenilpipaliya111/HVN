@@ -373,7 +373,7 @@ async def run():
                 or abs(float(await link.read(lv.PUMP2_SET))) > 0.05):
             raise RuntimeError("Set both pump commands to zero before starting")
         await start_together(link, rpm1, rpm2, CURRENT_A, VOLTAGE_LIMIT_V)
-        arrival_ts = t_pump1   # log immediately, including transport transients
+        arrival_ts = time.time() + delay_s  # Read only new spectra after the transport wait.
         if not DRY_RUN:
             uv_task = asyncio.create_task(uvvis_loop(link, writer, csv_file, t_pump1, arrival_ts))
         log.info("Pump setpoints written; PSU enable command sent")
