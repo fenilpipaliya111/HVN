@@ -4,6 +4,8 @@ Control two pumps and an EA PSI 9040-40 DT power supply, read exported UV–Vis 
 
 **Use one standalone Python file for a campaign.** Download the current file from this repository to the lab PC; GitHub changes do not automatically update the local copy. Run only one controller at a time.
 
+**New to this setup? Read the [simple setup and calibration guide](SETUP_GUIDE.md)** for equipment configuration, pump/UV–Vis calibration edits and a first run.
+
 ## Choose a standalone version
 
 Every standalone BO file includes pump/PSU control, calibration, UV–Vis parsing, BO, CSV logging, skip input, apparent hydrovanilloin FE and shutdown. No other local Python file or calibration workbook is required.
@@ -133,6 +135,51 @@ Ctrl+C still stops the entire campaign.
 Flush duration is volumes × 70 / flow_mL_min × 60 seconds, starting after the setpoint commands complete. A new campaign, including a resumed campaign, starts with 1.5 volumes. Each subsequent started condition uses 2.5 volumes.
 
 A failed measurement supplies no invented score to BO. Without a new observation, a normal failed attempt can repeat the same proposal; operator-skipped points are explicitly avoided. The 20-attempt plan does not guarantee 20 accepted results.
+
+## How Python communicates with LabVision
+
+This setup uses **OPC Expert as the bridge between Python and the LabVision control system**.
+
+~~~text
+Python controller (asyncua OPC UA client)
+        |
+        | OPC UA reads/writes
+        v
+OPC Expert bridge / OPC UA endpoint
+        |
+        | configured OPC connection to LabVision's instrument tags
+        v
+LabVision control system
+        |
+        v
+Pumps and power supply
+~~~
+
+Python uses the **asyncua** package to connect to the OPC UA endpoint exposed for this setup:
+
+~~~text
+opc.tcp://localhost:57888
+~~~
+
+The configured item prefix is:
+
+~~~text
+Hitec_OPC_DA20_Server->HVN:
+~~~
+
+For example, the full cathode pump setpoint NodeId is:
+
+~~~text
+ns=3;s=Hitec_OPC_DA20_Server->HVN:PUMP1.W1
+~~~
+
+Python writes pump RPM, current, voltage-limit and enable/disable commands to these OPC nodes; the configured OPC Expert/LabVision connection passes the commands to the equipment. Python is not directly controlling the pumps through a serial cable or the PSU through a vendor driver in this implementation.
+
+In OPC Expert, the LabVision OPC connection and the required items must be available to the OPC UA endpoint used by Python. The item names retain the source server name Hitec_OPC_DA20_Server. Use the actual bridge/source configuration on your own installation; the scripts do not create or configure OPC Expert or LabVision.
+
+**localhost means the computer running Python.** If OPC Expert's endpoint is on another PC, set OPC_URL (or URL in lv.py) to that PC's reachable OPC UA endpoint. Your own namespace index, prefix and item names may differ; browse them in OPC Expert and update node() and the tag settings accordingly. The existing code uses namespace index 3 and a connection without explicit username/certificate configuration; a server requiring authentication/security needs matching client configuration.
+
+The communication path and the analysis path are separate: **UV–Vis spectra are read from instrument-exported TXT files**, not streamed through these OPC tags.
 
 ## Pump calibration and PSU configuration
 
