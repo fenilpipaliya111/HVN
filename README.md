@@ -6,6 +6,12 @@ Control two pumps and an EA PSI 9040-40 DT power supply, read exported UV–Vis 
 
 **New to this setup? Read the [simple setup and calibration guide](SETUP_GUIDE.md)** for equipment configuration, pump/UV–Vis calibration edits and a first run.
 
+## Setup overview
+
+![Automated vanillin optimisation: communication, calibration, BO loop and outputs](docs/images/vanillin_setup_overview.png)
+
+[Open the full-size overview image](docs/images/vanillin_setup_overview.png).
+
 ## Choose a standalone version
 
 Every standalone BO file includes pump/PSU control, calibration, UV–Vis parsing, BO, CSV logging, skip input, apparent hydrovanilloin FE and shutdown. No other local Python file or calibration workbook is required.
@@ -344,3 +350,15 @@ Editing run_all.py or lv.py does not change embedded settings in standalone file
 Offline checks covered syntax, pump bounds and conversions, concentration-dependent charge/conversion calculations, apparent FE electron stoichiometry, preservation of values above 100%, CSV columns, post-flush reading gates, 15-spectrum acceptance and skipping during flushing/measurement.
 
 Physical pump delivery, achieved current, voltage, calibration in the experimental matrix, product selectivity and end-to-end lab operation have not been validated by those checks.
+
+
+## Example experimental results
+
+Uploaded experimental history files are stored unchanged in [results/](results/):
+
+| Dataset | Feed | Accepted experiments | File |
+|---|---|---:|---|
+| 10–100 RPM campaign, 28 October 2026 | 0.1 M | 8 | [CSV history](results/rpm10_100_0p1M_bo_history_20261028_124154.csv) |
+| Full-flow campaign, 28 October 2026 | 0.1 M | 20 | [Excel history](results/full_flow_0p1M_bo_history_20261028_103346.csv.xlsx) |
+
+These historical files predate the apparent FE output columns. They are original experimental records, not independently validated product yields or measured Faradaic efficiencies. Their presence does not establish hardware or analytical validation. See the [results notes](results/README.md).
