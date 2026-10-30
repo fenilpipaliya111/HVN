@@ -1,3 +1,17 @@
+# Runtime dependencies for all standalone BO, modular BO and fixed-run scripts.
+# Python 3.10+; install with the same interpreter used to run the experiment.
+# python -m pip install -r requirements.txt
+
+# OPC UA communication
 asyncua>=1.1,<2
+
+# Numerical calculations and Gaussian-process optimisation
 numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.4
+
+# Optimizer ask/tell, Real dimensions, LHS and expected improvement
 scikit-optimize>=0.10.2,<0.11
+
+# CSV and logging use the Python standard library.
+# pandas/openpyxl/xlsxwriter are not required: controllers do not write XLSX.
